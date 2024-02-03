@@ -296,6 +296,7 @@ public class Sender implements Runnable {
      *
      */
     void runOnce() {
+        // 事务相关的内容
         if (transactionManager != null) {
             try {
                 transactionManager.maybeResolveSequences();

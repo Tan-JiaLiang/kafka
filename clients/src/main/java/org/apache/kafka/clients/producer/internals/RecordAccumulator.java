@@ -298,6 +298,7 @@ public class RecordAccumulator {
                 final BuiltInPartitioner.StickyPartitionInfo partitionInfo;
                 final int effectivePartition;
                 if (partition == RecordMetadata.UNKNOWN_PARTITION) {
+                    // 由于用户没有指定partition，没有指定分区器，也没有指定分区key，所以在这里使用内置分区规则
                     partitionInfo = topicInfo.builtInPartitioner.peekCurrentPartitionInfo(cluster);
                     effectivePartition = partitionInfo.partition();
                 } else {

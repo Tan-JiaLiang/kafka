@@ -493,6 +493,7 @@ public class ProducerConfig extends AbstractConfig {
         CommonClientConfigs.postValidateSaslMechanismConfig(this);
         Map<String, Object> refinedConfigs = CommonClientConfigs.postProcessReconnectBackoffConfigs(this, parsedValues);
         postProcessAndValidateIdempotenceConfigs(refinedConfigs);
+        // 如果client.id没有设置，则默认设置一个
         maybeOverrideClientId(refinedConfigs);
         return refinedConfigs;
     }
@@ -504,6 +505,8 @@ public class ProducerConfig extends AbstractConfig {
             refinedClientId = this.getString(CLIENT_ID_CONFIG);
         } else {
             String transactionalId = this.getString(TRANSACTIONAL_ID_CONFIG);
+            // 如果是搞了多个kafka-producer，这里默认生成的client.id会是producer-1/producer-2……
+            // producer的ID是一个原子单调递增的
             refinedClientId = "producer-" + (transactionalId != null ? transactionalId : PRODUCER_CLIENT_ID_SEQUENCE.getAndIncrement());
         }
         configs.put(CLIENT_ID_CONFIG, refinedClientId);

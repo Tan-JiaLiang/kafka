@@ -74,8 +74,10 @@ public class ProducerMetadata extends Metadata {
 
     public synchronized int requestUpdateForTopic(String topic) {
         if (newTopics.contains(topic)) {
+            // 更新特定topic
             return requestUpdateForNewTopics();
         } else {
+            // 全量更新
             return requestUpdate();
         }
     }

@@ -369,6 +369,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                     config.originalsWithPrefix(CommonClientConfigs.METRICS_CONTEXT_PREFIX));
             this.metrics = new Metrics(metricConfig, reporters, time, metricsContext);
             this.producerMetrics = new KafkaProducerMetrics(metrics);
+            // 核心组件：构造分区器
             this.partitioner = config.getConfiguredInstance(
                     ProducerConfig.PARTITIONER_CLASS_CONFIG,
                     Partitioner.class,
@@ -393,6 +394,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 this.valueSerializer = valueSerializer;
             }
 
+            // 非核心组件，发送拦截器
             List<ProducerInterceptor<K, V>> interceptorList = (List) config.getConfiguredInstances(
                     ProducerConfig.INTERCEPTOR_CLASSES_CONFIG,
                     ProducerInterceptor.class,
@@ -403,11 +405,18 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 this.interceptors = new ProducerInterceptors<>(interceptorList);
             ClusterResourceListeners clusterResourceListeners = configureClusterResourceListeners(this.keySerializer,
                     this.valueSerializer, interceptorList, reporters);
+            // 发送一次写请求的最大大小（默认1MB），限制的是每次请求的最大大小（一个请求发送出去可能是一堆batch）
             this.maxRequestSize = config.getInt(ProducerConfig.MAX_REQUEST_SIZE_CONFIG);
+            // 发送缓存池内存大小（默认32MB），当这个缓存池满了就会阻塞写入，默认阻塞超时时间为60s（max.block.ms）
             this.totalMemorySize = config.getLong(ProducerConfig.BUFFER_MEMORY_CONFIG);
+            // 压缩格式，没有默认值，写时消耗CPU，消息大时最好配置一下，一般常用zstd
             this.compressionType = CompressionType.forName(config.getString(ProducerConfig.COMPRESSION_TYPE_CONFIG));
 
+            // 默认写阻塞超时时间为60s（max.block.ms），调用send方法的超时时间，譬如：
+            // 1. 拉取元数据，网络有问题，耗时较长
+            // 2. 数据放到内存缓冲区时，内存缓冲满了，阻塞等待
             this.maxBlockTimeMs = config.getLong(ProducerConfig.MAX_BLOCK_MS_CONFIG);
+            // 进入batch池到写入broker成功超时时间（包括linger.ms/request.timeout.ms/重试时间），默认120s
             int deliveryTimeoutMs = configureDeliveryTimeout(config, log);
 
             this.apiVersions = new ApiVersions();
@@ -421,10 +430,13 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             );
             // As per Kafka producer configuration documentation batch.size may be set to 0 to explicitly disable
             // batching which in practice actually means using a batch size of 1.
+            // 一个batch的大小，默认16KB
             int batchSize = Math.max(1, config.getInt(ProducerConfig.BATCH_SIZE_CONFIG));
+            // 核心组件，发送缓冲区，负责消息的复杂缓冲机制，发送到每个分区的消息会被打包成batch，一个broker上的多个分区对应多个batch会被打包成一个batch
             this.accumulator = new RecordAccumulator(logContext,
                     batchSize,
                     this.compressionType,
+                    // linger.ms，batch停留时间
                     lingerMs(config),
                     retryBackoffMs,
                     deliveryTimeoutMs,
@@ -439,11 +451,15 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             List<InetSocketAddress> addresses = ClientUtils.parseAndValidateAddresses(
                     config.getList(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG),
                     config.getString(ProducerConfig.CLIENT_DNS_LOOKUP_CONFIG));
+
+            // 核心组件：Metadata，用来从broker集群拉取元数据（Topic/Partitions/Leader/Follower/ISR）
             if (metadata != null) {
                 this.metadata = metadata;
             } else {
                 this.metadata = new ProducerMetadata(retryBackoffMs,
+                        // 间隔多久刷新一次元数据
                         config.getLong(ProducerConfig.METADATA_MAX_AGE_CONFIG),
+                        // 元数据没被使用超过多久，就会直接缓存失效（不再缓存）
                         config.getLong(ProducerConfig.METADATA_MAX_IDLE_CONFIG),
                         logContext,
                         clusterResourceListeners,
@@ -451,8 +467,11 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 this.metadata.bootstrap(addresses);
             }
             this.errors = this.metrics.sensor("errors");
+            // 核心组件：Sender，发送器，负责发送消息到broker，本质上是一个Runnable
             this.sender = newSender(logContext, kafkaClient, this.metadata);
             String ioThreadName = NETWORK_THREAD_PREFIX + " | " + clientId;
+            // 核心线程：是一个daemon线程，线程名kafka-producer-network-thread| + client.id
+            // 直接启动这个Sender线程
             this.ioThread = new KafkaThread(ioThreadName, this.sender, true);
             this.ioThread.start();
             config.logUnused();
@@ -506,23 +525,33 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
 
     // visible for testing
     Sender newSender(LogContext logContext, KafkaClient kafkaClient, ProducerMetadata metadata) {
+        // 客户端和Node通信之间最多缓存的request数量，默认参数为5，如果希望保证生产消息有序，那么此参数要设置为1，但是会降低生产吞吐量
         int maxInflightRequests = producerConfig.getInt(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION);
+        // 单次发送request超时时间，默认30s
         int requestTimeoutMs = producerConfig.getInt(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG);
         ChannelBuilder channelBuilder = ClientUtils.createChannelBuilder(producerConfig, time, logContext);
         ProducerMetrics metricsRegistry = new ProducerMetrics(this.metrics);
         Sensor throttleTimeSensor = Sender.throttleTimeSensor(metricsRegistry.senderMetrics);
+        // 核心组件KafkaClient（非线程安全）
         KafkaClient client = kafkaClient != null ? kafkaClient : new NetworkClient(
+                // connections.max.idle.ms，TCP连接超过一定时间没有活动，就会被关闭，默认9min
                 new Selector(producerConfig.getLong(ProducerConfig.CONNECTIONS_MAX_IDLE_MS_CONFIG),
                         this.metrics, time, "producer", channelBuilder, logContext),
                 metadata,
                 clientId,
                 maxInflightRequests,
+                // reconnect.backoff.ms，TCP连接失败后，重连TCP连接的间隔时间，默认50ms
                 producerConfig.getLong(ProducerConfig.RECONNECT_BACKOFF_MS_CONFIG),
+                // reconnect.backoff.max.ms，TCP连接失败后，重连TCP连接的间隔时间最大值，默认1s
                 producerConfig.getLong(ProducerConfig.RECONNECT_BACKOFF_MAX_MS_CONFIG),
+                // send.buffer.bytes，发送数据时使用的 TCP 发送缓冲区 (SO_SNDBUF) 的大小。如果值为-1，将使用操作系统默认值。默认128KB
                 producerConfig.getInt(ProducerConfig.SEND_BUFFER_CONFIG),
+                // receive.buffer.bytes，读取数据时使用的TCP接收缓冲区(SO_RCVBUF)的大小。如果值为-1，则使用操作系统默认值。默认32KB
                 producerConfig.getInt(ProducerConfig.RECEIVE_BUFFER_CONFIG),
                 requestTimeoutMs,
+                // socket连接超时时间，默认10s
                 producerConfig.getLong(ProducerConfig.SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG),
+                // socket连接最大超时时间，默认30s
                 producerConfig.getLong(ProducerConfig.SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG),
                 time,
                 true,
@@ -530,18 +559,25 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 throttleTimeSensor,
                 logContext);
 
+        // acks，默认值为all(-1)
+        // 0：不等broker响应，立马返回
+        // 1：leader落地后返回
+        // all（-1），消息发送后，ISR中所有的副本都收到消息，才返回
         short acks = Short.parseShort(producerConfig.getString(ProducerConfig.ACKS_CONFIG));
         return new Sender(logContext,
                 client,
                 metadata,
                 this.accumulator,
                 maxInflightRequests == 1,
+                // max.request.size，请求最大大小，避免发送巨大请求，默认1MB
                 producerConfig.getInt(ProducerConfig.MAX_REQUEST_SIZE_CONFIG),
                 acks,
+                // retries，重试次数，默认无限次重试
                 producerConfig.getInt(ProducerConfig.RETRIES_CONFIG),
                 metricsRegistry.senderMetrics,
                 time,
                 requestTimeoutMs,
+                // retry.backoff.ms，重试超时时间，默认100ms
                 producerConfig.getLong(ProducerConfig.RETRY_BACKOFF_MS_CONFIG),
                 this.transactionManager,
                 apiVersions);
@@ -552,8 +588,13 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
     }
 
     private static int configureDeliveryTimeout(ProducerConfig config, Logger log) {
+        // 发送成功时长（包括停留时间/发送时间/重试时间）
         int deliveryTimeoutMs = config.getInt(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG);
+
+        // batch停留时间，默认不停留
         int lingerMs = lingerMs(config);
+
+        // 请求超时时间，默认30s
         int requestTimeoutMs = config.getInt(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG);
         int lingerAndRequestTimeoutMs = (int) Math.min((long) lingerMs + requestTimeoutMs, Integer.MAX_VALUE);
 
@@ -958,6 +999,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
     @Override
     public Future<RecordMetadata> send(ProducerRecord<K, V> record, Callback callback) {
         // intercept the record, which can be potentially modified; this method does not throw exceptions
+        // 消息发送拦截器回调onSend方法
         ProducerRecord<K, V> interceptedRecord = this.interceptors.onSend(record);
         return doSend(interceptedRecord, callback);
     }
@@ -990,6 +1032,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
         try {
             throwIfProducerClosed();
             // first make sure the metadata for the topic is available
+            // 1. 首先获取元数据，确保元数据是可用的（如果缓存有就直接返回，如果缓存没有即发送请求到broker中获取）
             long nowMs = time.milliseconds();
             ClusterAndWaitTime clusterAndWaitTime;
             try {
@@ -999,9 +1042,11 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                     throw new KafkaException("Producer closed while send in progress", e);
                 throw e;
             }
+            // 记录一下获取元数据花了多少时间
             nowMs += clusterAndWaitTime.waitedOnMetadataMs;
             long remainingWaitMs = Math.max(0, maxBlockTimeMs - clusterAndWaitTime.waitedOnMetadataMs);
             Cluster cluster = clusterAndWaitTime.cluster;
+            // 2. 序列化key成byte[]
             byte[] serializedKey;
             try {
                 serializedKey = keySerializer.serialize(record.topic(), record.headers(), record.key());
@@ -1010,6 +1055,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                         " to class " + producerConfig.getClass(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG).getName() +
                         " specified in key.serializer", cce);
             }
+            // 3. 序列化value成byte[]
             byte[] serializedValue;
             try {
                 serializedValue = valueSerializer.serialize(record.topic(), record.headers(), record.value());
@@ -1022,11 +1068,14 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             // Try to calculate partition, but note that after this call it can be RecordMetadata.UNKNOWN_PARTITION,
             // which means that the RecordAccumulator would pick a partition using built-in logic (which may
             // take into account broker load, the amount of data produced to each partition, etc.).
+            // 4. 使用分区器计算消息的partition分区
             int partition = partition(record, serializedKey, serializedValue, cluster);
 
+            // header相关逻辑
             setReadOnly(record.headers());
             Header[] headers = record.headers().toArray();
 
+            // 5. 估算消息大小，判断是否超出阈值
             int serializedSize = AbstractRecords.estimateSizeInBytesUpperBound(apiVersions.maxUsableProduceMagic(),
                     compressionType, serializedKey, serializedValue, headers);
             ensureValidRecordSize(serializedSize);
@@ -1037,10 +1086,12 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
 
             // Append the record to the accumulator.  Note, that the actual partition may be
             // calculated there and can be accessed via appendCallbacks.topicPartition.
+            // 6. 将消息添加到内存缓冲池中去
             RecordAccumulator.RecordAppendResult result = accumulator.append(record.topic(), partition, timestamp, serializedKey,
                     serializedValue, headers, appendCallbacks, remainingWaitMs, abortOnNewBatch, nowMs, cluster);
             assert appendCallbacks.getPartition() != RecordMetadata.UNKNOWN_PARTITION;
 
+            // 7. batch满了，创建一个新的batch，重新计算partition（默认是粘性分区的轮询partitioner），重新尝试放入缓冲池中去
             if (result.abortForNewBatch) {
                 int prevPartition = partition;
                 onNewBatch(record.topic(), cluster, prevPartition);
@@ -1061,10 +1112,13 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 transactionManager.maybeAddPartition(appendCallbacks.topicPartition());
             }
 
+            // 8. 如果某个分区对应的batch满了，或者是新建了一个batch，唤醒sender去发送
             if (result.batchIsFull || result.newBatchCreated) {
                 log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), appendCallbacks.getPartition());
                 this.sender.wakeup();
             }
+
+            // 9. 发送成功
             return result.future;
             // handling exceptions and record the errors;
             // for API exceptions return them in the future,
@@ -1125,9 +1179,11 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
         Integer partitionsCount = cluster.partitionCountForTopic(topic);
         // Return cached metadata if we have it, and if the record's partition is either undefined
         // or within the known partition range
+        // 缓存里面读到了，直接返回
         if (partitionsCount != null && (partition == null || partition < partitionsCount))
             return new ClusterAndWaitTime(cluster, 0);
 
+        // 下面的逻辑是发送请求到broker，拉取topic元数据
         long remainingWaitMs = maxWaitMs;
         long elapsed = 0;
         // Issue metadata requests until we have metadata for the topic and the requested partition,
@@ -1141,9 +1197,12 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 log.trace("Requesting metadata update for topic {}.", topic);
             }
             metadata.add(topic, nowMs + elapsed);
+            // 设置标志位，等待sender线程更新
             int version = metadata.requestUpdateForTopic(topic);
+            // 唤醒sender线程
             sender.wakeup();
             try {
+                // 等待sender线程更新元数据（等待version发生变化），数据会更新到metadata缓存里面
                 metadata.awaitUpdate(version, remainingWaitMs);
             } catch (TimeoutException ex) {
                 // Rethrow with original maxWaitMs to prevent logging exception with remainingWaitMs
@@ -1151,7 +1210,9 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                         String.format("Topic %s not present in metadata after %d ms.",
                                 topic, maxWaitMs));
             }
+            // 重新从metadata缓存获取数据
             cluster = metadata.fetch();
+            // 计算耗时
             elapsed = time.milliseconds() - nowMs;
             if (elapsed >= maxWaitMs) {
                 throw new TimeoutException(partitionsCount == null ?
@@ -1165,8 +1226,10 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             partitionsCount = cluster.partitionCountForTopic(topic);
         } while (partitionsCount == null || (partition != null && partition >= partitionsCount));
 
+        // 拉取元数据耗时
         producerMetrics.recordMetadataWait(time.nanoseconds() - nowNanos);
 
+        // 返回元数据和耗时
         return new ClusterAndWaitTime(cluster, elapsed);
     }
 
@@ -1384,9 +1447,11 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
      * partitioning logic).
      */
     private int partition(ProducerRecord<K, V> record, byte[] serializedKey, byte[] serializedValue, Cluster cluster) {
+        // 如果设置了partition，则直接使用
         if (record.partition() != null)
             return record.partition();
 
+        // 如果设置了partition分区器，则使用分区器进行partition分区
         if (partitioner != null) {
             int customPartition = partitioner.partition(
                 record.topic(), record.key(), serializedKey, record.value(), serializedValue, cluster);
@@ -1397,6 +1462,8 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             return customPartition;
         }
 
+        // 如果设置了key，则按照key进行partition分区
+        // 如果没有设置key，则直接返回RecordMetadata.UNKNOWN_PARTITION（后续由RecordAccumulator进行分区）
         if (serializedKey != null && !partitionerIgnoreKeys) {
             // hash the keyBytes to choose a partition
             return BuiltInPartitioner.partitionForKey(serializedKey, cluster.partitionsForTopic(record.topic()).size());

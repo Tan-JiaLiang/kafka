@@ -25,10 +25,14 @@ public class Node {
 
     private static final Node NO_NODE = new Node(-1, "", -1);
 
+    // 这个是server.properties中的broker.id参数设置的
     private final int id;
     private final String idString;
+    // 地址
     private final String host;
+    // 端口号
     private final int port;
+    // 机架
     private final String rack;
 
     // Cache hashCode as it is called in performance sensitive parts of the code (e.g. RecordAccumulator.ready)

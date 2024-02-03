@@ -48,11 +48,17 @@ import java.util.Objects;
  */
 public class ProducerRecord<K, V> {
 
+    // 写入的topic，不能为空
     private final String topic;
+    // 写入的partition，如果不设置，则按照partitioner进行分配
     private final Integer partition;
+    // 消息附加信息
     private final Headers headers;
+    // 消息分区键
     private final K key;
+    // 消息值
     private final V value;
+    // 消息时间戳
     private final Long timestamp;
 
     /**

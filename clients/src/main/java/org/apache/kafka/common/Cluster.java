@@ -35,15 +35,23 @@ import java.util.Set;
 public final class Cluster {
 
     private final boolean isBootstrapConfigured;
+    // Kafka Brokers列表
     private final List<Node> nodes;
+    // 没有被授权访问的Topic列表（Kafka支持权限控制），如果你的客户端没有被授权访问某个topic，那么就会放在这个列表里
     private final Set<String> unauthorizedTopics;
     private final Set<String> invalidTopics;
+    // 内部topics，如：__consumer_group__
     private final Set<String> internalTopics;
     private final Node controller;
+    // TopicPartition代表一个topic的分区，PartitionInfo代表一个分区的信息，包含该分区的leader、副本、ISR等信息
     private final Map<TopicPartition, PartitionInfo> partitionsByTopicPartition;
+    // 每个topic有哪些分区
     private final Map<String, List<PartitionInfo>> partitionsByTopic;
+    // 每个topic有哪些可用的分区，如果某个分区没有leader是存活的，此时那个分区就不可用了
     private final Map<String, List<PartitionInfo>> availablePartitionsByTopic;
+    // BrokerId和Partition的映射关系
     private final Map<Integer, List<PartitionInfo>> partitionsByNode;
+    // brokerId和Node的映射关系
     private final Map<Integer, Node> nodesById;
     private final ClusterResource clusterResource;
     private final Map<String, Uuid> topicIds;
