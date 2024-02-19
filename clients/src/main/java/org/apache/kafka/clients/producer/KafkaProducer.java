@@ -535,6 +535,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
         // 核心组件KafkaClient（非线程安全）
         KafkaClient client = kafkaClient != null ? kafkaClient : new NetworkClient(
                 // connections.max.idle.ms，TCP连接超过一定时间没有活动，就会被关闭，默认9min
+                // 创建NIO selector
                 new Selector(producerConfig.getLong(ProducerConfig.CONNECTIONS_MAX_IDLE_MS_CONFIG),
                         this.metrics, time, "producer", channelBuilder, logContext),
                 metadata,
@@ -1113,6 +1114,8 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             }
 
             // 8. 如果某个分区对应的batch满了，或者是新建了一个batch，唤醒sender去发送
+            // 这里其实很关键的，因为一开始sender线程是无限期等待，当linger.ms为0时，第一条消息肯定会创建一个batch
+            // 创建batch的话就会唤醒Sender线程，那么sender线程就会判断是否要发送消息了
             if (result.batchIsFull || result.newBatchCreated) {
                 log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), appendCallbacks.getPartition());
                 this.sender.wakeup();

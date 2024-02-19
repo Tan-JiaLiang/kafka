@@ -64,28 +64,33 @@ public class BuiltInPartitioner {
 
     /**
      * Calculate the next partition for the topic based on the partition load stats.
+     * 根据负载统计信息，计算下一个分区
      */
     private int nextPartition(Cluster cluster) {
         int random = mockRandom != null ? mockRandom.get() : Utils.toPositive(ThreadLocalRandom.current().nextInt());
 
         // Cache volatile variable in local variable.
+        // 分区负载统计信息
         PartitionLoadStats partitionLoadStats = this.partitionLoadStats;
         int partition;
 
         if (partitionLoadStats == null) {
             // We don't have stats to do adaptive partitioning (or it's disabled), just switch to the next
             // partition based on uniform distribution.
+            // 没有负载统计信息，直接使用随机分区
             List<PartitionInfo> availablePartitions = cluster.availablePartitionsForTopic(topic);
             if (availablePartitions.size() > 0) {
                 partition = availablePartitions.get(random % availablePartitions.size()).partition();
             } else {
                 // We don't have available partitions, just pick one among all partitions.
+                // 没有可用分区（可能leader挂了，在选举，不知道选举好了没），随便挑一个
                 List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
                 partition = random % partitions.size();
             }
         } else {
             // Calculate next partition based on load distribution.
             // Note that partitions without leader are excluded from the partitionLoadStats.
+            // 基于partition负载分布计算下一个partition（注意，没有leader的分区不参与负载统计）
             assert partitionLoadStats.length > 0;
 
             int[] cumulativeFrequencyTable = partitionLoadStats.cumulativeFrequencyTable;
@@ -139,16 +144,20 @@ public class BuiltInPartitioner {
      * @return sticky partition info object
      */
     StickyPartitionInfo peekCurrentPartitionInfo(Cluster cluster) {
+        // 如果已经有一个粘性分区，直接返回
         StickyPartitionInfo partitionInfo = stickyPartitionInfo.get();
         if (partitionInfo != null)
             return partitionInfo;
 
         // We're the first to create it.
+        // 创建一个新的粘性分区，这里符合高并发的场景
+        // 直接用乐观锁机制处理，如果设置成功，直接返回，如果没有设置成功，则说明有人已经设置了，直接返回用就好了
         partitionInfo = new StickyPartitionInfo(nextPartition(cluster));
         if (stickyPartitionInfo.compareAndSet(null, partitionInfo))
             return partitionInfo;
 
         // Someone has raced us.
+        // 因为已经有人设置过了，所以直接返回就好了
         return stickyPartitionInfo.get();
     }
 

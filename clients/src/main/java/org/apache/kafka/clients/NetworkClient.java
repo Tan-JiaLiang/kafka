@@ -91,6 +91,7 @@ public class NetworkClient implements KafkaClient {
     private final ClusterConnectionStates connectionStates;
 
     /* the set of requests currently being sent or awaiting a response */
+    // 正在发送的请求
     private final InFlightRequests inFlightRequests;
 
     /* the socket send buffer size in bytes */
@@ -293,9 +294,11 @@ public class NetworkClient implements KafkaClient {
         if (node.isEmpty())
             throw new IllegalArgumentException("Cannot connect to empty node " + node);
 
+        // 已经与broker建立过连接了，可以直接发送数据
         if (isReady(node, now))
             return true;
 
+        // 未连接，尝试初始化连接，这里是非阻塞I/O，所以还不知道连上没，就直接返回了，所以这里要返回false
         if (connectionStates.canConnect(node.idString(), now))
             // if we are interested in sending to a node and we don't have a connection to it, initiate one
             initiateConnect(node, now);
@@ -457,6 +460,9 @@ public class NetworkClient implements KafkaClient {
      * @param now the current timestamp
      */
     private boolean canSendRequest(String node, long now) {
+        // broker是否已经建立连接了
+        // selector上是否有这个broker的channel
+        // 如果对一个broker已经发送了五个请求，都没有收到响应，就不能继续发送了
         return connectionStates.isReady(node, now) && selector.isChannelReady(node) &&
             inFlightRequests.canSendMore(node);
     }
@@ -540,7 +546,9 @@ public class NetworkClient implements KafkaClient {
                 request,
                 send,
                 now);
+        // 正在请求的requests
         this.inFlightRequests.add(inFlightRequest);
+        // 将请求通过NIO发送出去，这个写逻辑在selector中
         selector.send(new NetworkSend(clientRequest.destination(), send));
     }
 
@@ -573,16 +581,29 @@ public class NetworkClient implements KafkaClient {
             log.error("Unexpected error during I/O", e);
         }
 
+        // 来到这里，只会出现两种情况
+        // 1. 已经有请求完成了
+        // 2. 等待超时了
+
         // process completed actions
+        // 更新时间
         long updatedNow = this.time.milliseconds();
         List<ClientResponse> responses = new ArrayList<>();
+        // 处理已发送的请求
         handleCompletedSends(responses, updatedNow);
+        // 处理获取到的请求
         handleCompletedReceives(responses, updatedNow);
+        // 处理已关闭的连接
         handleDisconnections(responses, updatedNow);
+        // 处理连接
         handleConnections();
+        //
         handleInitiateApiVersionRequests(updatedNow);
+        // 处理超时连接
         handleTimedOutConnections(responses, updatedNow);
+        // 处理超时请求
         handleTimedOutRequests(responses, updatedNow);
+        // 回调响应hook（譬如发送消息成功，这里调用其回调方法）
         completeResponses(responses);
 
         return responses;
@@ -873,9 +894,13 @@ public class NetworkClient implements KafkaClient {
     private void handleCompletedSends(List<ClientResponse> responses, long now) {
         // if no response is expected then when the send is completed, return it
         for (NetworkSend send : this.selector.completedSends()) {
+            // 获取最近一条requests，但不移除
             InFlightRequest request = this.inFlightRequests.lastSent(send.destinationId());
             if (!request.expectResponse) {
+                // 譬如acks为0时，会进入这段逻辑
+                // 直接删除掉requests，因为不需要知道返回结果
                 this.inFlightRequests.completeLastSent(send.destinationId());
+                // 完成发送
                 responses.add(request.completed(null, now));
             }
         }
@@ -907,9 +932,12 @@ public class NetworkClient implements KafkaClient {
      */
     private void handleCompletedReceives(List<ClientResponse> responses, long now) {
         for (NetworkReceive receive : this.selector.completedReceives()) {
+            // 获取brokerID
             String source = receive.source();
+            // 移除发给这个brokers上的最近一条requests
             InFlightRequest req = inFlightRequests.completeNext(source);
 
+            // 反序列化成response
             AbstractResponse response = parseResponse(receive.payload(), req.header);
             if (throttleTimeSensor != null)
                 throttleTimeSensor.record(response.throttleTimeMs(), now);
@@ -920,8 +948,10 @@ public class NetworkClient implements KafkaClient {
             }
 
             // If the received response includes a throttle delay, throttle the connection.
+            // 限流
             maybeThrottle(response, req.header.apiVersion(), req.destination, now);
             if (req.isInternalRequest && response instanceof MetadataResponse)
+                // response属于元数据更新
                 metadataUpdater.handleSuccessfulResponse(req.header, now, (MetadataResponse) response);
             else if (req.isInternalRequest && response instanceof ApiVersionsResponse)
                 handleApiVersionsResponse(responses, req, now, (ApiVersionsResponse) response);
@@ -1062,6 +1092,7 @@ public class NetworkClient implements KafkaClient {
 
         @Override
         public boolean isUpdateDue(long now) {
+            // 当前正在加载元数据，已经到加载元数据的时候了
             return !hasFetchInProgress() && this.metadata.timeToNextUpdate(now) == 0;
         }
 
@@ -1082,12 +1113,15 @@ public class NetworkClient implements KafkaClient {
 
             // Beware that the behavior of this method and the computation of timeouts for poll() are
             // highly dependent on the behavior of leastLoadedNode.
+            // 获取一个node，这个node可能还没有TCP连接，但是没关系
+            // 这里只是拿到一个node去请求元数据
             Node node = leastLoadedNode(now);
             if (node == null) {
                 log.debug("Give up sending metadata request since no node is available");
                 return reconnectBackoffMs;
             }
 
+            // 发送请求，返回等待时长
             return maybeUpdate(now, node);
         }
 
@@ -1125,6 +1159,8 @@ public class NetworkClient implements KafkaClient {
 
         @Override
         public void handleSuccessfulResponse(RequestHeader requestHeader, long now, MetadataResponse response) {
+           // 处理元数据请求响应，更新元数据
+
             // If any partition has leader with missing listeners, log up to ten of these partitions
             // for diagnosing broker configuration issues.
             // This could be a transient issue if listeners were added dynamically to brokers.
@@ -1179,6 +1215,7 @@ public class NetworkClient implements KafkaClient {
         private long maybeUpdate(long now, Node node) {
             String nodeConnectionId = node.idString();
 
+            // 如果可以发送请求，那么立马发送，并返回请求超时时间
             if (canSendRequest(nodeConnectionId, now)) {
                 Metadata.MetadataRequestAndVersion requestAndVersion = metadata.newMetadataRequestAndVersion(now);
                 MetadataRequest.Builder metadataRequest = requestAndVersion.requestBuilder;
@@ -1191,12 +1228,14 @@ public class NetworkClient implements KafkaClient {
             // If there's any connection establishment underway, wait until it completes. This prevents
             // the client from unnecessarily connecting to additional nodes while a previous connection
             // attempt has not been completed.
+            // 正在重连中
             if (isAnyNodeConnecting()) {
                 // Strictly the timeout we should return here is "connect timeout", but as we don't
                 // have such application level configuration, using reconnect backoff instead.
                 return reconnectBackoffMs;
             }
 
+            // 还没建立TCP连接，则建立连接，并且返回超时时间
             if (connectionStates.canConnect(nodeConnectionId, now)) {
                 // We don't have a connection to this node right now, make one
                 log.debug("Initialize connection to node {} for sending metadata request", node);
@@ -1207,6 +1246,7 @@ public class NetworkClient implements KafkaClient {
             // connected, but can't send more OR connecting
             // In either case, we just need to wait for a network event to let us know the selected
             // connection might be usable again.
+            // 等待就好了，因为已经发送了请求
             return Long.MAX_VALUE;
         }
 
@@ -1258,6 +1298,7 @@ public class NetworkClient implements KafkaClient {
         final RequestHeader header;
         final String destination;
         final RequestCompletionHandler callback;
+        // acks != 0
         final boolean expectResponse;
         final AbstractRequest request;
         final boolean isInternalRequest; // used to flag requests which are initiated internally by NetworkClient

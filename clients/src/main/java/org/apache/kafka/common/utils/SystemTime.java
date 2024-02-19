@@ -43,6 +43,7 @@ public class SystemTime implements Time {
 
     @Override
     public void waitObject(Object obj, Supplier<Boolean> condition, long deadlineMs) throws InterruptedException {
+        // 这里用了典型的生产消费模型，直接synchronized obj，然后直接调用wait，等待更新完成后notify信号
         synchronized (obj) {
             while (true) {
                 if (condition.get())

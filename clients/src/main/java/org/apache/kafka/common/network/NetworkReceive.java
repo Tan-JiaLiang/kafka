@@ -35,6 +35,7 @@ public class NetworkReceive implements Receive {
     private static final Logger log = LoggerFactory.getLogger(NetworkReceive.class);
     private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.allocate(0);
 
+    // brokerId
     private final String source;
     private final ByteBuffer size;
     private final int maxSize;
@@ -79,19 +80,29 @@ public class NetworkReceive implements Receive {
     }
 
     public long readFrom(ScatteringByteChannel channel) throws IOException {
+        // 首先kafka是用数据头（固定4字节大小，数据INT类型，是数据块的大小）+数据块组成一个数据包的
+        // channel里面的socket buffer可能满了，那么可能出现数据头还未读完，或者数据包读不完的问题
+        // 下面这段逻辑就是要解决粘包问题，每次selector poll都要会处理socket buffer里面的内容，将它读到byte buffer里面反序列化成一个消息
+        // 当socket buffer读完后，这里会直接返回，然后重新调用selector poll方法等待下一次处理
+        // complete方法是用来给外层判断，消息是否已经读完了
+
+        // read是读了多少个字节
         int read = 0;
         if (size.hasRemaining()) {
+            // 读header信息，这里是4个字节，是一个long，代表我这条消息有多大
             int bytesRead = channel.read(size);
             if (bytesRead < 0)
                 throw new EOFException();
             read += bytesRead;
             if (!size.hasRemaining()) {
                 size.rewind();
+                // 获取这条消息的大小
                 int receiveSize = size.getInt();
                 if (receiveSize < 0)
                     throw new InvalidReceiveException("Invalid receive (size = " + receiveSize + ")");
                 if (maxSize != UNLIMITED && receiveSize > maxSize)
                     throw new InvalidReceiveException("Invalid receive (size = " + receiveSize + " larger than " + maxSize + ")");
+                // 这条消息大小
                 requestedBufferSize = receiveSize; //may be 0 for some payloads (SASL)
                 if (receiveSize == 0) {
                     buffer = EMPTY_BUFFER;
@@ -99,6 +110,7 @@ public class NetworkReceive implements Receive {
             }
         }
         if (buffer == null && requestedBufferSize != -1) { //we know the size we want but havent been able to allocate it yet
+            // 创建一个字节缓冲区，接收消息
             buffer = memoryPool.tryAllocate(requestedBufferSize);
             if (buffer == null)
                 log.trace("Broker low on memory - could not allocate buffer of size {} for source {}", requestedBufferSize, source);

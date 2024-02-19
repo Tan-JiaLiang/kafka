@@ -113,8 +113,11 @@ public class KafkaChannel implements AutoCloseable {
         THROTTLE_ENDED
     }
 
+    // brokerID
     private final String id;
+    // 传输组件，封装了底层Java NIO的SocketChannel
     private final TransportLayer transportLayer;
+    // 认证授权相关的
     private final Supplier<Authenticator> authenticatorCreator;
     private Authenticator authenticator;
     // Tracks accumulated network thread time. This is updated on the network thread.
@@ -123,7 +126,9 @@ public class KafkaChannel implements AutoCloseable {
     private final int maxReceiveSize;
     private final MemoryPool memoryPool;
     private final ChannelMetadataRegistry metadataRegistry;
+    // 这个channel最近一次读出来的响应，先暂存在这里，也是会不断地变换的
     private NetworkReceive receive;
+    // 要交给底层的channel发送出去的请求，可能会不断地变换的，因为发送完一个请求要发送下一个请求
     private NetworkSend send;
     // Track connection and mute state of channels to enable outstanding requests on channels to be
     // processed after the channel is disconnected.
@@ -380,6 +385,7 @@ public class KafkaChannel implements AutoCloseable {
         if (this.send != null)
             throw new IllegalStateException("Attempt to begin a send operation with prior send operation still in progress, connection id is " + id);
         this.send = send;
+        // 监听OP_WRITE事件
         this.transportLayer.addInterestOps(SelectionKey.OP_WRITE);
     }
 

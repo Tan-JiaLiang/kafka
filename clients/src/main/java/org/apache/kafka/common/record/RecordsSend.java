@@ -39,11 +39,14 @@ public abstract class RecordsSend<T extends BaseRecords> implements Send {
 
     @Override
     public boolean completed() {
+        // 是否已经把消息写完了
         return remaining <= 0 && !pending;
     }
 
     @Override
     public final long writeTo(TransferableChannel channel) throws IOException {
+        // 要注意，这里发送出去的时候，可能消息还没发完，这里可能就直接返回这次写了多少字节了
+        // 下一次进来这个方法的时候会继续写（使用completed判断是否已经写完），只要还有剩余字节，selector就要一直监听OP_WRITE事件
         long written = 0;
 
         if (remaining > 0) {

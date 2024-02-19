@@ -63,6 +63,7 @@ public final class ProducerBatch {
 
     final long createdMs;
     final TopicPartition topicPartition;
+    // batch发送的异步结果
     final ProduceRequestResult produceFuture;
 
     private final List<Thunk> thunks = new ArrayList<>();
@@ -104,12 +105,16 @@ public final class ProducerBatch {
      */
     public FutureRecordMetadata tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers, Callback callback, long now) {
         if (!recordsBuilder.hasRoomFor(timestamp, key, value, headers)) {
+            // batch base size + current record size > batch.size
+            // batch.size不足以容纳该条记录
             return null;
         } else {
+            // 追加写入到这个batch中
             this.recordsBuilder.append(timestamp, key, value, headers);
             this.maxRecordSize = Math.max(this.maxRecordSize, AbstractRecords.estimateSizeInBytesUpperBound(magic(),
                     recordsBuilder.compressionType(), key, value, headers));
             this.lastAppendTime = now;
+            // 异步返回
             FutureRecordMetadata future = new FutureRecordMetadata(this.produceFuture, this.recordCount,
                                                                    timestamp,
                                                                    key == null ? -1 : key.length,
@@ -117,6 +122,7 @@ public final class ProducerBatch {
                                                                    Time.SYSTEM);
             // we have to keep every future returned to the users in case the batch needs to be
             // split to several new batches and resent.
+            // thunk是用来做异步回调的
             thunks.add(new Thunk(callback, future));
             this.recordCount++;
             return future;
@@ -231,6 +237,7 @@ public final class ProducerBatch {
         }
 
         if (this.finalState.compareAndSet(null, tryFinalState)) {
+            // 回调batches里面的record的回调方法
             completeFutureAndFireCallbacks(baseOffset, logAppendTime, recordExceptions);
             return true;
         }
@@ -270,6 +277,7 @@ public final class ProducerBatch {
                         thunk.callback.onCompletion(metadata, null);
                     } else {
                         RuntimeException exception = recordExceptions.apply(i);
+                        // 调用用户自定义的回调方法
                         thunk.callback.onCompletion(null, exception);
                     }
                 }

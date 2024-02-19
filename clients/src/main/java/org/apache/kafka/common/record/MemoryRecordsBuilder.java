@@ -137,6 +137,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
 
         bufferStream.position(initialPosition + batchHeaderSizeInBytes);
         this.bufferStream = bufferStream;
+        // 注意这里的appendStream，会进行数据压缩（ZSTD/LZO/ZIP…）
         this.appendStream = new DataOutputStream(compressionType.wrapForOutput(this.bufferStream, magic));
 
         if (hasDeleteHorizonMs()) {
@@ -346,6 +347,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
 
         validateProducerState();
 
+        // 关闭流
         closeForRecordAppends();
 
         if (numRecords == 0L) {
@@ -722,6 +724,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
         ensureOpenForRecordAppend();
         int offsetDelta = (int) (offset - baseOffset);
         long timestampDelta = timestamp - baseTimestamp;
+        // 写入appendStream，要注意，这里的appendStream是嵌套了zstd/lzo压缩逻辑的
         int sizeInBytes = DefaultRecord.writeTo(appendStream, offsetDelta, timestampDelta, key, value, headers);
         recordWritten(offset, timestamp, sizeInBytes);
     }

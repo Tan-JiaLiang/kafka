@@ -46,12 +46,15 @@ public class BufferPool {
 
     static final String WAIT_TIME_SENSOR_NAME = "bufferpool-wait-time";
 
+    // 默认最多32MB
     private final long totalMemory;
+    // batch.size，默认16KB
     private final int poolableSize;
     private final ReentrantLock lock;
     private final Deque<ByteBuffer> free;
     private final Deque<Condition> waiters;
     /** Total available memory is the sum of nonPooledAvailableMemory and the number of byte buffers in free * poolableSize.  */
+    // 剩余未分配的可用内存大小
     private long nonPooledAvailableMemory;
     private final Metrics metrics;
     private final Time time;
@@ -125,19 +128,24 @@ public class BufferPool {
 
         try {
             // check if we have a free buffer of the right size pooled
+            // 如果有空闲的内存，直接用返回空闲缓存
             if (size == poolableSize && !this.free.isEmpty())
                 return this.free.pollFirst();
 
             // now check if the request is immediately satisfiable with the
             // memory on hand or if we need to block
+            // 总空闲空间size
             int freeListSize = freeSize() * this.poolableSize;
             if (this.nonPooledAvailableMemory + freeListSize >= size) {
                 // we have enough unallocated or pooled memory to immediately
                 // satisfy the request, but need to allocate the buffer
+                // 有足够的未分配内存可以使用，但是要释放一些空闲的内存
+                // 譬如我的一个batch.size是16KB，但是这条消息要18KB才能装得下，那么就要回收一些空闲的16KB，再分配
                 freeUp(size);
                 this.nonPooledAvailableMemory -= size;
             } else {
                 // we are out of memory and will have to block
+                // 已经没有空间分配了，需要阻塞等待
                 int accumulated = 0;
                 Condition moreMemory = this.lock.newCondition();
                 try {
@@ -204,6 +212,7 @@ public class BufferPool {
             }
         }
 
+        // 分配内存 or 直接返回
         if (buffer == null)
             return safeAllocateByteBuffer(size);
         else
@@ -270,6 +279,7 @@ public class BufferPool {
             } else {
                 this.nonPooledAvailableMemory += size;
             }
+            // 释放完内存后，通知等待的线程（譬如有写阻塞的线程，他们阻塞在这里等待申请内存）
             Condition moreMem = this.waiters.peekFirst();
             if (moreMem != null)
                 moreMem.signal();

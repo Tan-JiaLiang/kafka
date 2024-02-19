@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 final class InFlightRequests {
 
+    // 单个broker最大requests数量
     private final int maxInFlightRequestsPerConnection;
     private final Map<String, Deque<NetworkClient.InFlightRequest>> requests = new HashMap<>();
     /** Thread safe total number of in flight requests. */
@@ -86,7 +87,9 @@ final class InFlightRequests {
      * @return The request
      */
     public NetworkClient.InFlightRequest completeLastSent(String node) {
+        // 移除掉第一条requests
         NetworkClient.InFlightRequest inFlightRequest = requestQueue(node).pollFirst();
+        // 记录requests+1
         inFlightRequestCount.decrementAndGet();
         return inFlightRequest;
     }
@@ -98,6 +101,7 @@ final class InFlightRequests {
      * @return true iff we have no requests still being sent to the given node
      */
     public boolean canSendMore(String node) {
+        // 单个Node，最多可以同时容纳maxInFlightRequestsPerConnection个请求同时发送等待返回
         Deque<NetworkClient.InFlightRequest> queue = requests.get(node);
         return queue == null || queue.isEmpty() ||
                (queue.peekFirst().send.completed() && queue.size() < this.maxInFlightRequestsPerConnection);

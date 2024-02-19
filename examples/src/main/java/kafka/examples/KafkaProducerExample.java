@@ -18,7 +18,6 @@ public class KafkaProducerExample {
         props.put("linger.ms", 100);
         props.put("retries", 10);
         props.put("retry.backoff.ms", 300);
-        props.put("request.required.acks", "1");
         KafkaProducer<String, String> producer = new KafkaProducer<>(props);
 
         ProducerRecord<String, String> record =

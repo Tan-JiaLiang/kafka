@@ -52,11 +52,14 @@ public class StickyPartitionCache {
         if (oldPart == null || oldPart == prevPartition) {
             List<PartitionInfo> availablePartitions = cluster.availablePartitionsForTopic(topic);
             if (availablePartitions.size() < 1) {
+                // 没有可用partition，随机获取可用partitions
                 Integer random = Utils.toPositive(ThreadLocalRandom.current().nextInt());
                 newPart = random % partitions.size();
             } else if (availablePartitions.size() == 1) {
+                // 只有一个可用partition，直接使用它
                 newPart = availablePartitions.get(0).partition();
             } else {
+                // 随机获取一个partition，并且新的partition不等于旧的sticky partition
                 while (newPart == null || newPart.equals(oldPart)) {
                     int random = Utils.toPositive(ThreadLocalRandom.current().nextInt());
                     newPart = availablePartitions.get(random % availablePartitions.size()).partition();
