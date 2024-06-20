@@ -23,6 +23,11 @@ import org.apache.kafka.common.KafkaException;
  *  1. the message offset
  *  2. the base message offset of the located segment
  *  3. the physical position on the located segment
+ *
+ * LogOffsetMetadata由以下三部分组成
+ * 1. message offset（LEO）
+ * 2. segment base offset
+ * 3. segment的物理position
  */
 public final class LogOffsetMetadata {
 

@@ -129,6 +129,7 @@ public class ProduceRequest extends AbstractRequest {
 
     // visible for testing
     Map<TopicPartition, Integer> partitionSizes() {
+        // double check
         if (partitionSizes == null) {
             // this method may be called by different thread (see the comment on data)
             synchronized (this) {

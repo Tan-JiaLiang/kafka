@@ -87,7 +87,9 @@ object Kafka extends Logging {
 
   def main(args: Array[String]): Unit = {
     try {
+      // 获取配置文件
       val serverProps = getPropsFromArgs(args)
+      // 创建Server类
       val server = buildServer(serverProps)
 
       try {
@@ -100,6 +102,7 @@ object Kafka extends Logging {
       }
 
       // attach shutdown handler to catch terminating signals as well as normal termination
+      // 退出的钩子函数
       Exit.addShutdownHook("kafka-shutdown-hook", {
         try server.shutdown()
         catch {
@@ -110,6 +113,7 @@ object Kafka extends Logging {
         }
       })
 
+      // 启动server
       try server.startup()
       catch {
         case e: Throwable =>
@@ -118,6 +122,7 @@ object Kafka extends Logging {
           Exit.exit(1)
       }
 
+      // 主线程阻塞，等待server退出
       server.awaitShutdown()
     }
     catch {

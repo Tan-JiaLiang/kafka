@@ -34,10 +34,13 @@ import java.util.Set;
 
 public class ProducerMetadata extends Metadata {
     // If a topic hasn't been accessed for this many milliseconds, it is removed from the cache.
+    // 元数据没被使用超过多久，就会直接缓存失效（不再缓存）
     private final long metadataIdleMs;
 
     /* Topics with expiry time */
+    // key是topic名，value是topic过期时间
     private final Map<String, Long> topics = new HashMap<>();
+    // 待更新的topic
     private final Set<String> newTopics = new HashSet<>();
     private final Logger log;
     private final Time time;
@@ -67,6 +70,8 @@ public class ProducerMetadata extends Metadata {
     public synchronized void add(String topic, long nowMs) {
         Objects.requireNonNull(topic, "topic cannot be null");
         if (topics.put(topic, nowMs + metadataIdleMs) == null) {
+            // 首次添加topic，会走下面这段逻辑
+            // 请求更新这个topic的元数据
             newTopics.add(topic);
             requestUpdateForNewTopics();
         }

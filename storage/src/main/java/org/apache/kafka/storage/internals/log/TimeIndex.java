@@ -52,6 +52,7 @@ import java.nio.MappedByteBuffer;
  */
 public class TimeIndex extends AbstractIndex {
     private static final Logger log = LoggerFactory.getLogger(TimeIndex.class);
+    // 一条索引占用的字节大小，timestamp占用8B，relative offset占用4B
     private static final int ENTRY_SIZE = 12;
 
     private volatile TimestampOffset lastEntry;
@@ -200,6 +201,8 @@ public class TimeIndex extends AbstractIndex {
             // We only append to the time index when the timestamp is greater than the last inserted timestamp.
             // If all the messages are in message format v0, the timestamp will always be NoTimestamp. In that case, the time
             // index will be empty.
+            // 只有当时间戳大于上次插入的时间戳时，我们才会追加时间索引。
+            // 如果所有报文都是报文格式 v0，则时间戳总是 NoTimestamp。在这种情况下，时间索引将为空。
             if (timestamp > lastEntry.timestamp) {
                 log.trace("Adding index entry {} => {} to {}.", timestamp, offset, file().getAbsolutePath());
                 MappedByteBuffer mmap = mmap();

@@ -134,12 +134,14 @@ class LogSegment private[log] (val log: FileRecords,
    * Append the given messages starting with the given offset. Add
    * an entry to the index if needed.
    *
+   * 往这个partition的这个segment写入一批数据
+   *
    * It is assumed this method is being called from within a lock.
    *
-   * @param largestOffset The last offset in the message set
-   * @param largestTimestamp The largest timestamp in the message set.
-   * @param shallowOffsetOfMaxTimestamp The offset of the message that has the largest timestamp in the messages to append.
-   * @param records The log entries to append.
+   * @param largestOffset The last offset in the message set  这批数据最大的offset
+   * @param largestTimestamp The largest timestamp in the message set. 这批数据的最大timestamp
+   * @param shallowOffsetOfMaxTimestamp The offset of the message that has the largest timestamp in the messages to append. 这批数据中最大的timestamp那条数据对应的offset
+   * @param records The log entries to append.  写入的数据
    * @return the physical position in the file of the appended records
    * @throws LogSegmentOffsetOverflowException if the largest offset causes index offset overflow
    */
@@ -158,15 +160,25 @@ class LogSegment private[log] (val log: FileRecords,
       ensureOffsetInRange(largestOffset)
 
       // append the messages
+      // 顺序写入一条数据
       val appendedBytes = log.append(records)
       trace(s"Appended $appendedBytes to ${log.file} at end offset $largestOffset")
       // Update the in memory max timestamp and corresponding offset.
+      // 时间索引的值，实际上是二级索引
+      // 存储的是时间和数据的offset
+      // 更新一下当前最大时间戳的最大offset
       if (largestTimestamp > maxTimestampSoFar) {
         maxTimestampAndOffsetSoFar = new TimestampOffset(largestTimestamp, shallowOffsetOfMaxTimestamp)
       }
       // append an entry to the index (if needed)
+      // 更新.index稀疏索引，使用index.interval.bytes配置，默认是4096
+      // 即每在.index中写入4KB数据就更新一次稀疏索引
+      // 存储的是offset和实际磁盘物理偏移量
       if (bytesSinceLastIndexEntry > indexIntervalBytes) {
+        // 更新.index
         offsetIndex.append(largestOffset, physicalPosition)
+        // 更新.timeindex
+        // 写入目前为止最大的timestamp及其对应的offset
         timeIndex.maybeAppend(maxTimestampSoFar, offsetOfMaxTimestampSoFar)
         bytesSinceLastIndexEntry = 0
       }
@@ -297,6 +309,8 @@ class LogSegment private[log] (val log: FileRecords,
     if (maxSize < 0)
       throw new IllegalArgumentException(s"Invalid max size $maxSize for log read from segment $log")
 
+    // 通过二分查找法，在给定的.index中找出position
+    // 这里比较亮的一个点在于，他是从mmap（也就是os cache）中找.index对应的position
     val startOffsetAndSize = translateOffset(startOffset)
 
     // if the start position is already off the end of the log, return null
@@ -317,6 +331,7 @@ class LogSegment private[log] (val log: FileRecords,
     // calculate the length of the message set to read based on whether or not they gave us a maxOffset
     val fetchSize: Int = min((maxPosition - startPosition).toInt, adjustedMaxSize)
 
+    // 返回fetch data info
     new FetchDataInfo(offsetMetadata, log.slice(startPosition, fetchSize),
       adjustedMaxSize < startOffsetAndSize.size, Optional.empty())
   }
@@ -670,10 +685,15 @@ object LogSegment {
            initFileSize: Int = 0, preallocate: Boolean = false, fileSuffix: String = ""): LogSegment = {
     val maxIndexSize = config.maxIndexSize
     new LogSegment(
+      // .log文件
       FileRecords.open(UnifiedLog.logFile(dir, baseOffset, fileSuffix), fileAlreadyExists, initFileSize, preallocate),
+      // .index文件
       LazyIndex.forOffset(UnifiedLog.offsetIndexFile(dir, baseOffset, fileSuffix), baseOffset, maxIndexSize),
+      // .timeindex文件
       LazyIndex.forTime(UnifiedLog.timeIndexFile(dir, baseOffset, fileSuffix), baseOffset, maxIndexSize),
+      // .txnindex文件
       new TransactionIndex(baseOffset, UnifiedLog.transactionIndexFile(dir, baseOffset, fileSuffix)),
+      // 当前文件开始的offset
       baseOffset,
       indexIntervalBytes = config.indexInterval,
       rollJitterMs = config.randomSegmentJitter,

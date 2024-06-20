@@ -125,12 +125,16 @@ abstract class AbstractFetcherManager[T <: AbstractFetcherThread](val name: Stri
   // to be defined in subclass to create a specific fetcher
   def createFetcherThread(fetcherId: Int, sourceBroker: BrokerEndPoint): T
 
+  /**
+   * 针对某一批分区创建一个拉取数据的fetcher线程
+   */
   def addFetcherForPartitions(partitionAndOffsets: Map[TopicPartition, InitialFetchState]): Unit = {
     lock synchronized {
       val partitionsPerFetcher = partitionAndOffsets.groupBy { case (topicPartition, brokerAndInitialFetchOffset) =>
         BrokerAndFetcherId(brokerAndInitialFetchOffset.leader, getFetcherId(topicPartition))
       }
 
+      // 定义一个方法，创建并启动fetcher线程
       def addAndStartFetcherThread(brokerAndFetcherId: BrokerAndFetcherId,
                                    brokerIdAndFetcherId: BrokerIdAndFetcherId): T = {
         val fetcherThread = createFetcherThread(brokerAndFetcherId.fetcherId, brokerAndFetcherId.broker)
@@ -141,6 +145,7 @@ abstract class AbstractFetcherManager[T <: AbstractFetcherThread](val name: Stri
 
       for ((brokerAndFetcherId, initialFetchOffsets) <- partitionsPerFetcher) {
         val brokerIdAndFetcherId = BrokerIdAndFetcherId(brokerAndFetcherId.broker.id, brokerAndFetcherId.fetcherId)
+        // getOrCreate fetcher线程
         val fetcherThread = fetcherThreadMap.get(brokerIdAndFetcherId) match {
           case Some(currentFetcherThread) if currentFetcherThread.leader.brokerEndPoint() == brokerAndFetcherId.broker =>
             // reuse the fetcher thread

@@ -60,20 +60,34 @@ import static org.apache.kafka.common.record.RecordBatch.NO_PARTITION_LEADER_EPO
  */
 public class Metadata implements Closeable {
     private final Logger log;
+    // 刷新元数据失败时，重试间隔
     private final long refreshBackoffMs;
+    // 间隔多久刷新一次元数据
     private final long metadataExpireMs;
+    // 每次更新元数据后+1
     private int updateVersion;  // bumped on every metadata response
+    // 每次请求更新元数据+1
     private int requestVersion; // bumped on every new topic addition
+    // 最近一次更新时间
     private long lastRefreshMs;
+    // 最近一次更新成功时间
     private long lastSuccessfulRefreshMs;
+    // 致命异常
     private KafkaException fatalException;
+    // 无效topics，server端返回Errors.INVALID_TOPIC_EXCEPTION时的topic
     private Set<String> invalidTopics;
+    // 未授权的topics，server端返回Errors.TOPIC_AUTHORIZATION_FAILED时的topic
     private Set<String> unauthorizedTopics;
+    // 核心组件，元数据缓存
     private MetadataCache cache = MetadataCache.empty();
+    // 是否需要全量更新
     private boolean needFullUpdate;
+    // 是否需要部分更新
     private boolean needPartialUpdate;
     private final ClusterResourceListeners clusterResourceListeners;
     private boolean isClosed;
+    // 缓存的key是topic partition，value是leader epoch
+    // 即缓存了partition的leader epoch
     private final Map<TopicPartition, Integer> lastSeenLeaderEpochs;
 
     /**
@@ -275,6 +289,7 @@ public class Metadata implements Closeable {
 
         String previousClusterId = cache.clusterResource().clusterId();
 
+        // 更新元数据
         this.cache = handleMetadataResponse(response, isPartialUpdate, nowMs);
 
         Cluster cluster = cache.cluster();
@@ -316,11 +331,15 @@ public class Metadata implements Closeable {
      */
     private MetadataCache handleMetadataResponse(MetadataResponse metadataResponse, boolean isPartialUpdate, long nowMs) {
         // All encountered topics.
+        // 所有topic
         Set<String> topics = new HashSet<>();
 
         // Retained topics to be passed to the metadata cache.
+        // 内置topic
         Set<String> internalTopics = new HashSet<>();
+        // 未授权的topic
         Set<String> unauthorizedTopics = new HashSet<>();
+        // 非法topic
         Set<String> invalidTopics = new HashSet<>();
 
         List<MetadataResponse.PartitionMetadata> partitions = new ArrayList<>();
@@ -371,6 +390,7 @@ public class Metadata implements Closeable {
             }
         }
 
+        // 获取broker列表（猜测这里会返回所有broker的信息）
         Map<Integer, Node> nodes = metadataResponse.brokersById();
         if (isPartialUpdate)
             return this.cache.mergeWith(metadataResponse.clusterId(), nodes, partitions,

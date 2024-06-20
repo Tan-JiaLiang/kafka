@@ -30,6 +30,9 @@ import org.apache.kafka.common.utils.Utils
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
+/**
+ * meta.properties存储的元数据
+ */
 object RawMetaProperties {
   val ClusterIdKey = "cluster.id"
   val BrokerIdKey = "broker.id"

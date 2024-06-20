@@ -62,13 +62,14 @@ public class FileRecords extends AbstractRecords implements Closeable {
                 boolean isSlice) throws IOException {
         this.file = file;
         this.channel = channel;
-        this.start = start;
-        this.end = end;
+        this.start = start; // 读取的起始位置position
+        this.end = end;     // 文件的结束位置position
         this.isSlice = isSlice;
         this.size = new AtomicInteger();
 
         if (isSlice) {
             // don't check the file size if this is just a slice view
+            // 读取大小
             size.set(end - start);
         } else {
             if (channel.size() > Integer.MAX_VALUE)
@@ -134,6 +135,7 @@ public class FileRecords extends AbstractRecords implements Closeable {
      * @return A sliced wrapper on this message set limited based on the given position and size
      */
     public FileRecords slice(int position, int size) throws IOException {
+        // availableBytes当前文件可读大小
         int availableBytes = availableBytes(position, size);
         int startPosition = this.start + position;
         return new FileRecords(file, channel, startPosition, startPosition + availableBytes, true);

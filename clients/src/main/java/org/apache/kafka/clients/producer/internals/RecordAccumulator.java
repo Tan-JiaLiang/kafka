@@ -67,18 +67,26 @@ public class RecordAccumulator {
     private final LogContext logContext;
     private final Logger log;
     private volatile boolean closed;
+    // 正在执行flushes的线程数
     private final AtomicInteger flushesInProgress;
+    // 正在执行appends的线程数
     private final AtomicInteger appendsInProgress;
+    // 发送的每个批次大小，默认16KB
     private final int batchSize;
+    // 压缩格式，默认未none，最好用zstd
     private final CompressionType compression;
+    // 发送的批次停留时间，默认为0
     private final int lingerMs;
+    // 发送失败后重试时间
     private final long retryBackoffMs;
+    // 从调用send方法到发送成功的总超时时间（譬如你无限次重试，也会受这个时间影响）
     private final int deliveryTimeoutMs;
     private final long partitionAvailabilityTimeoutMs;  // latency threshold for marking partition temporary unavailable
     private final boolean enableAdaptivePartitioning;
     private final BufferPool free;
     private final Time time;
     private final ApiVersions apiVersions;
+    // 核心组件，topic partition要写的batch都在这里
     private final ConcurrentMap<String /*topic*/, TopicInfo> topicInfoMap = new CopyOnWriteMap<>();
     private final ConcurrentMap<Integer /*nodeId*/, NodeLatencyStats> nodeStats = new CopyOnWriteMap<>();
     private final IncompleteBatches incomplete;

@@ -177,6 +177,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       }
 
       request.header.apiKey match {
+        // 生产消息请求
         case ApiKeys.PRODUCE => handleProduceRequest(request, requestLocal)
         case ApiKeys.FETCH => handleFetchRequest(request)
         case ApiKeys.LIST_OFFSETS => handleListOffsetRequest(request)
@@ -567,9 +568,13 @@ class KafkaApis(val requestChannel: RequestChannel,
       }
     }
 
+    // 未授权的topic
     val unauthorizedTopicResponses = mutable.Map[TopicPartition, PartitionResponse]()
+    // 不存在的topic
     val nonExistingTopicResponses = mutable.Map[TopicPartition, PartitionResponse]()
+    // 不合法的request
     val invalidRequestResponses = mutable.Map[TopicPartition, PartitionResponse]()
+    // 通过校验的request
     val authorizedRequestInfo = mutable.Map[TopicPartition, MemoryRecords]()
     // cache the result to avoid redundant authorization calls
     val authorizedTopics = authHelper.filterByAuthorized(request.context, WRITE, TOPIC,
@@ -581,24 +586,30 @@ class KafkaApis(val requestChannel: RequestChannel,
       // We cast the type to avoid causing big change to code base.
       // https://issues.apache.org/jira/browse/KAFKA-10698
       val memoryRecords = partition.records.asInstanceOf[MemoryRecords]
-      if (!authorizedTopics.contains(topicPartition.topic))
+      if (!authorizedTopics.contains(topicPartition.topic)) {
+        // 没有权限
         unauthorizedTopicResponses += topicPartition -> new PartitionResponse(Errors.TOPIC_AUTHORIZATION_FAILED)
-      else if (!metadataCache.contains(topicPartition))
+      } else if (!metadataCache.contains(topicPartition)) {
+        // topic partition不存在
         nonExistingTopicResponses += topicPartition -> new PartitionResponse(Errors.UNKNOWN_TOPIC_OR_PARTITION)
-      else
+      } else {
+        // 可以写入
         try {
+          // 校验消息
           ProduceRequest.validateRecords(request.header.apiVersion, memoryRecords)
           authorizedRequestInfo += (topicPartition -> memoryRecords)
         } catch {
           case e: ApiException =>
             invalidRequestResponses += topicPartition -> new PartitionResponse(Errors.forException(e))
         }
+      }
     })
 
     // the callback for sending a produce response
     // The construction of ProduceResponse is able to accept auto-generated protocol data so
     // KafkaApis#handleProduceRequest should apply auto-generated protocol to avoid extra conversion.
     // https://issues.apache.org/jira/browse/KAFKA-10730
+    // 定义一个发送callback函数，无论成功和失败都会调用这个callback函数
     @nowarn("cat=deprecation")
     def sendResponseCallback(responseStatus: Map[TopicPartition, PartitionResponse]): Unit = {
       val mergedResponseStatus = responseStatus ++ unauthorizedTopicResponses ++ nonExistingTopicResponses ++ invalidRequestResponses
@@ -636,6 +647,8 @@ class KafkaApis(val requestChannel: RequestChannel,
 
       // Send the response immediately. In case of throttling, the channel has already been muted.
       if (produceRequest.acks == 0) {
+        // 当acks为0时，说明client，不关注response
+        // 但是可能topic partition的元数据发生变更，譬如leader变了，这里要通知client重新刷新元数据
         // no operation needed if producer request.required.acks = 0; however, if there is any error in handling
         // the request, since no response is expected by the producer, the server will close socket server so that
         // the producer client will know that some error has happened and will refresh its metadata
@@ -655,6 +668,7 @@ class KafkaApis(val requestChannel: RequestChannel,
           requestHelper.sendNoOpResponseExemptThrottle(request)
         }
       } else {
+        // 将response放入RequestChannel队列中
         requestChannel.sendResponse(request, new ProduceResponse(mergedResponseStatus.asJava, maxThrottleTimeMs), None)
       }
     }
@@ -671,6 +685,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       val internalTopicsAllowed = request.header.clientId == AdminUtils.AdminClientId
 
       // call the replica manager to append messages to the replicas
+      // 将消息通过replica manager写入
       replicaManager.appendRecords(
         timeout = produceRequest.timeout.toLong,
         requiredAcks = produceRequest.acks,
@@ -683,6 +698,8 @@ class KafkaApis(val requestChannel: RequestChannel,
 
       // if the request is put into the purgatory, it will have a held reference and hence cannot be garbage collected;
       // hence we clear its data here in order to let GC reclaim its memory since it is already appended to log
+      // 如果请求被放入炼狱，它就会有一个被保留的引用，因此无法被垃圾回收；
+      // 因此，我们在此清除其数据，以便让 GC 回收其内存，因为它已被附加到日志中。
       produceRequest.clearPartitionRecords()
     }
   }
@@ -700,6 +717,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       else
         Collections.emptyMap[Uuid, String]()
 
+    // 从fetch request中获取topic-partition和要fetch的startOffset、size和epoch
     val fetchData = fetchRequest.fetchData(topicNames)
     val forgottenTopics = fetchRequest.forgottenTopics(topicNames)
 
@@ -715,6 +733,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     val interesting = mutable.ArrayBuffer[(TopicIdPartition, FetchRequest.PartitionData)]()
     if (fetchRequest.isFromFollower) {
       // The follower must have ClusterAction on ClusterResource in order to fetch partition data.
+      // 为了获取分区数据，follower必须在ClusterResource上有ClusterAction。
       if (authHelper.authorize(request.context, CLUSTER_ACTION, CLUSTER, CLUSTER_NAME)) {
         fetchContext.foreachPartition { (topicIdPartition, data) =>
           if (topicIdPartition.topic == null)
@@ -731,6 +750,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       }
     } else {
       // Regular Kafka consumers need READ permission on each partition they are fetching.
+      // 通过kafka client consumer读取数据，需要READ权限校验
       val partitionDatas = new mutable.ArrayBuffer[(TopicIdPartition, FetchRequest.PartitionData)]
       fetchContext.foreachPartition { (topicIdPartition, partitionData) =>
         if (topicIdPartition.topic == null)
@@ -960,6 +980,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       else
         quotas.fetch.getMaxValueInQuotaWindow(request.session, clientId).toInt
 
+      // fetch size
       val fetchMaxBytes = Math.min(Math.min(fetchRequest.maxBytes, config.fetchMaxBytes), maxQuotaWindowBytes)
       val fetchMinBytes = Math.min(fetchRequest.minBytes, fetchMaxBytes)
 
@@ -975,6 +996,7 @@ class KafkaApis(val requestChannel: RequestChannel,
         Optional.empty()
       }
 
+      // fetch参数组装
       val params = new FetchParams(
         versionId,
         fetchRequest.replicaId,
@@ -987,6 +1009,7 @@ class KafkaApis(val requestChannel: RequestChannel,
       )
 
       // call the replica manager to fetch messages from the local replica
+      // 调用replica manager去获取消息
       replicaManager.fetchMessages(
         params = params,
         fetchInfos = interesting,

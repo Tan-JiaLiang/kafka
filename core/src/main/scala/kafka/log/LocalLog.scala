@@ -158,6 +158,10 @@ class LocalLog(@volatile private var _dir: File,
 
   /**
    * The number of messages appended to the log since the last flush
+   *
+   * 有多少条数据还在os cache中
+   * recovery point是已经flush到磁盘的offset
+   * log end offset是已经写入的最大offset
    */
   private[log] def unflushedMessages: Long = logEndOffset - recoveryPoint
 
@@ -372,6 +376,8 @@ class LocalLog(@volatile private var _dir: File,
   /**
    * Read messages from the log.
    *
+   * 从.log中读取数据
+   *
    * @param startOffset The offset to begin reading at
    * @param maxLength The maximum number of bytes to read
    * @param minOneMessage If this is true, the first message will be returned even if it exceeds `maxLength` (if one exists)
@@ -391,9 +397,14 @@ class LocalLog(@volatile private var _dir: File,
 
       val endOffsetMetadata = nextOffsetMetadata
       val endOffset = endOffsetMetadata.messageOffset
+      // 从众多的.log文件中找到最接近startOffset的.log文件
+      // 譬如我有0.log、10.log、15.log、20.log
+      // 如果我的startOffset=18, 那么应该返回15.log这个segment
       var segmentOpt = segments.floorSegment(startOffset)
 
       // return error on attempt to read beyond the log end offset
+      // 这种情况属于超出offset范围了
+      // 要么segment已经过期了，要么你的offset太大了，现在文件都还不存在
       if (startOffset > endOffset || segmentOpt.isEmpty)
         throw new OffsetOutOfRangeException(s"Received request for offset $startOffset for partition $topicPartition, " +
           s"but we only have log segments upto $endOffset.")
@@ -416,11 +427,12 @@ class LocalLog(@volatile private var _dir: File,
             if (maxOffsetMetadata.segmentBaseOffset == segment.baseOffset) maxOffsetMetadata.relativePositionInSegment
             else segment.size
 
+          // 从这个segment读取数据
           fetchDataInfo = segment.read(startOffset, maxLength, maxPosition, minOneMessage)
           if (fetchDataInfo != null) {
             if (includeAbortedTxns)
               fetchDataInfo = addAbortedTransactions(startOffset, segment, fetchDataInfo)
-          } else segmentOpt = segments.higherSegment(baseOffset)
+          } else segmentOpt = segments.higherSegment(baseOffset)  // 返回比baseOffset大的segment
         }
 
         if (fetchDataInfo != null) fetchDataInfo
@@ -435,8 +447,10 @@ class LocalLog(@volatile private var _dir: File,
   }
 
   private[log] def append(lastOffset: Long, largestTimestamp: Long, shallowOffsetOfMaxTimestamp: Long, records: MemoryRecords): Unit = {
+    // 基于segments写磁盘
     segments.activeSegment.append(largestOffset = lastOffset, largestTimestamp = largestTimestamp,
       shallowOffsetOfMaxTimestamp = shallowOffsetOfMaxTimestamp, records = records)
+    // 更新LEO
     updateLogEndOffset(lastOffset + 1)
   }
 
@@ -494,7 +508,9 @@ class LocalLog(@volatile private var _dir: File,
     maybeHandleIOException(s"Error while rolling log segment for $topicPartition in dir ${dir.getParent}") {
       val start = time.hiResClockMs()
       checkIfMemoryMappedBufferClosed()
+      // LEO作为newOffset，要注意LEO永远是大于最后一条数据的offset
       val newOffset = math.max(expectedNextOffset.getOrElse(0L), logEndOffset)
+      // 创建.log文件，使用LEO作为文件的名字
       val logFile = LogFileUtils.logFile(dir, newOffset, "")
       val activeSegment = segments.activeSegment
       if (segments.contains(newOffset)) {
@@ -532,8 +548,9 @@ class LocalLog(@volatile private var _dir: File,
         segments.lastSegment.foreach(_.onBecomeInactiveSegment())
       }
 
+      // 创建segment
       val newSegment = LogSegment.open(dir,
-        baseOffset = newOffset,
+        baseOffset = newOffsBet,
         config,
         time = time,
         initFileSize = config.initFileSize,

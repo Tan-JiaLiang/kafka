@@ -680,8 +680,10 @@ public class Selector implements Selectable, AutoCloseable {
     // package-private for testing
     void write(KafkaChannel channel) throws IOException {
         String nodeId = channel.id();
+        // 将消息写入channel中
         long bytesSent = channel.write();
         // 消息还未写完，此时这里会返回NULL
+        // 如果已经完成写，那么取消NIO的OP_WRITE事件
         NetworkSend send = channel.maybeCompleteSend();
         // We may complete the send with bytesSent < 1 if `TransportLayer.hasPendingWrites` was true and `channel.write()`
         // caused the pending writes to be written to the socket channel buffer

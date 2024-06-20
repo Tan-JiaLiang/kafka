@@ -198,6 +198,7 @@ class ReplicaManager(val config: KafkaConfig,
                      ) extends Logging {
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
 
+  // 延迟调度机制，时间轮算法
   val delayedProducePurgatory = delayedProducePurgatoryParam.getOrElse(
     DelayedOperationPurgatory[DelayedProduce](
       purgatoryName = "Produce", brokerId = config.brokerId,
@@ -215,14 +216,22 @@ class ReplicaManager(val config: KafkaConfig,
       purgatoryName = "ElectLeader", brokerId = config.brokerId))
 
   /* epoch of the controller that last changed the leader */
+  // epoch，选举version
   @volatile private[server] var controllerEpoch: Int = KafkaController.InitialControllerEpoch
+  // 当前的brokerID
   protected val localBrokerId = config.brokerId
+  // 所有的partitions
   protected val allPartitions = new Pool[TopicPartition, HostedPartition](
     valueFactory = Some(tp => HostedPartition.Online(Partition(tp, time, this)))
   )
   protected val replicaStateChangeLock = new Object
+  // 核心组件，控制副本拉取与同步
   val replicaFetcherManager = createReplicaFetcherManager(metrics, time, threadNamePrefix, quotaManagers.follower)
   private[server] val replicaAlterLogDirsManager = createReplicaAlterLogDirsManager(quotaManagers.alterLogDirs, brokerTopicStats)
+  // 高水位相关组件
+  // 每个leader写入一条消息，leader partition的LEO会推进一位
+  // 但是必须等到所有的follower都同步了这条消息，partition的HW才能整体推进一位
+  // 消费者只能读取到HW高水位以下的消息
   private val highWatermarkCheckPointThreadStarted = new AtomicBoolean(false)
   @volatile private[server] var highWatermarkCheckpoints: Map[String, OffsetCheckpointFile] = logManager.liveLogDirs.map(dir =>
     (dir.getAbsolutePath, new OffsetCheckpointFile(new File(dir, ReplicaManager.HighWatermarkFilename), logDirFailureChannel))).toMap
@@ -607,6 +616,16 @@ class ReplicaManager(val config: KafkaConfig,
    * Noted that all pending delayed check operations are stored in a queue. All callers to ReplicaManager.appendRecords()
    * are expected to call ActionQueue.tryCompleteActions for all affected partitions, without holding any conflicting
    * locks.
+   *
+   * @param timeout 超时时间
+   * @param requiredAcks 0: no acks, 1: waits for leader to write to disk, -1: waits for all replicas to write to disk
+   * @param internalTopicsAllowed 是否允许内部topic
+   * @param origin append来源
+   * @param entriesPerPartition 一个MAP，key是topic partition，value是要写入的值
+   * @param responseCallback 回调函数
+   * @param delayedProduceLock 一个锁，用于防止重复append
+   * @param recordConversionStatsCallback 回调函数(用来做metrics的可忽略)
+   * @param requestLocal 是否允许缓存
    */
   def appendRecords(timeout: Long,
                     requiredAcks: Short,
@@ -617,12 +636,22 @@ class ReplicaManager(val config: KafkaConfig,
                     delayedProduceLock: Option[Lock] = None,
                     recordConversionStatsCallback: Map[TopicPartition, RecordConversionStats] => Unit = _ => (),
                     requestLocal: RequestLocal = RequestLocal.NoCaching): Unit = {
+
+    // 一个Request里面，其实是把属于一个Broker的多个分区的Batch给放在里面
+    // 但是每个分区只有一个Batch是在里面的
+    // 大致可以推测一下，一个Batch大致对应于一个MemoryRecords
+    // 回调函数的结构，也是一个Batch对应一个response
+
     if (isValidRequiredAcks(requiredAcks)) {
+      // 正常逻辑走这里
       val sTime = time.milliseconds
+      // 核心代码，往本地磁盘append，将数据写入每个分区的磁盘文件中
+      // 返回每个分区的本地磁盘文件的写入结果
       val localProduceResults = appendToLocalLog(internalTopicsAllowed = internalTopicsAllowed,
         origin, entriesPerPartition, requiredAcks, requestLocal)
       debug("Produce to local log in %d ms".format(time.milliseconds - sTime))
 
+      // 组装返回结果
       val produceStatus = localProduceResults.map { case (topicPartition, result) =>
         topicPartition -> ProducePartitionStatus(
           result.info.lastOffset + 1, // required offset
@@ -660,26 +689,36 @@ class ReplicaManager(val config: KafkaConfig,
       recordConversionStatsCallback(localProduceResults.map { case (k, v) => k -> v.info.recordConversionStats })
 
       if (delayedProduceRequestRequired(requiredAcks, entriesPerPartition, localProduceResults)) {
+        // 进入这里说明acks=-1，需要所有的ISR都同步完再返回response
+
         // create delayed produce operation
+        // 创建一个延迟生产操作
         val produceMetadata = ProduceMetadata(requiredAcks, produceStatus)
         val delayedProduce = new DelayedProduce(timeout, produceMetadata, this, responseCallback, delayedProduceLock)
 
         // create a list of (topic, partition) pairs to use as keys for this delayed produce operation
+        // 创建一个（主题、分区）对列表，作为此延迟生成操作的键值
         val producerRequestKeys = entriesPerPartition.keys.map(TopicPartitionOperationKey(_)).toSeq
 
         // try to complete the request immediately, otherwise put it into the purgatory
         // this is because while the delayed produce operation is being created, new
         // requests may arrive and hence make this operation completable.
+        // 尽量立即完成请求，否则将其放入炼狱。
+        // 这是因为在创建延迟生成操作时，可能会有新的请求到达，从而使该操作可以完成。
+        // 可能会有新的请求，从而使该操作可以完成。
         delayedProducePurgatory.tryCompleteElseWatch(delayedProduce, producerRequestKeys)
 
       } else {
         // we can respond immediately
+        // 直接返回响应
         val produceResponseStatus = produceStatus.map { case (k, status) => k -> status.responseStatus }
+        // 调用response回调函数
         responseCallback(produceResponseStatus)
       }
     } else {
       // If required.acks is outside accepted range, something is wrong with the client
       // Just return an error and don't handle the request at all
+      // 走到这里说明ack是不合法的值，直接报错
       val responseStatus = entriesPerPartition.map { case (topicPartition, _) =>
         topicPartition -> new PartitionResponse(
           Errors.INVALID_REQUIRED_ACKS,
@@ -962,18 +1001,22 @@ class ReplicaManager(val config: KafkaConfig,
     if (traceEnabled)
       trace(s"Append [$entriesPerPartition] to local log")
 
+    // 遍历map，每个partition要写入的消息
     entriesPerPartition.map { case (topicPartition, records) =>
       brokerTopicStats.topicStats(topicPartition.topic).totalProduceRequestRate.mark()
       brokerTopicStats.allTopicsStats.totalProduceRequestRate.mark()
 
       // reject appending to internal topics if it is not allowed
+      // 内部topic，譬如__consumer_offsets，类似这样的topic，kafka内部使用
       if (Topic.isInternal(topicPartition.topic) && !internalTopicsAllowed) {
         (topicPartition, LogAppendResult(
           LogAppendInfo.UNKNOWN_LOG_APPEND_INFO,
           Some(new InvalidTopicException(s"Cannot append to internal topic ${topicPartition.topic}"))))
       } else {
         try {
+          // 获取partition对象
           val partition = getPartitionOrException(topicPartition)
+          // 核心代码，往当前partition append消息
           val info = partition.appendRecordsToLeader(records, origin, requiredAcks, requestLocal)
           val numAppendedMessages = info.numMessages
 
@@ -1142,6 +1185,7 @@ class ReplicaManager(val config: KafkaConfig,
               s"${preferredReadReplica.get} for ${params.clientMetadata}")
           }
           // If a preferred read-replica is set, skip the read
+          // 关注partition.fetchOffsetSnapshot方法
           val offsetSnapshot = partition.fetchOffsetSnapshot(fetchInfo.currentLeaderEpoch, fetchOnlyFromLeader = false)
           LogReadResult(info = new FetchDataInfo(LogOffsetMetadata.UNKNOWN_OFFSET_METADATA, MemoryRecords.EMPTY),
             divergingEpoch = None,
@@ -1664,14 +1708,31 @@ class ReplicaManager(val config: KafkaConfig,
   }
 
   /*
+   * 什么时候会调用这个方法呢？
+   * 如果说一个broker感知到了自己被分配了一些follower分区之后
+   * 可能就会来调用这个方法，在这里就会为一批follower分区创建一个fetcher线程
+   * 接下来fetcher线程就会负责去拉取数据到本地副本了
+   *
    * Make the current broker to become follower for a given set of partitions by:
+   * 当前broker要变成follower会做以下事情
    *
    * 1. Remove these partitions from the leader partitions set.
+   * 既然这些分区是follower分配给了这个broker，此时就需要强制性将这些分区从leader集合中挪出去
+   *
    * 2. Mark the replicas as followers so that no more data can be added from the producer clients.
+   * 将这些副本标识为follower，这样的话，没有任何producer可以直接往副本里写入数据
+   *
    * 3. Stop fetchers for these partitions so that no more data can be added by the replica fetcher threads.
+   * 对这些分区停止掉已有的ReplicaFetcher线程，保证暂时别别用已有的fetcher线程去拉取数据
+   *
    * 4. Truncate the log and checkpoint offsets for these partitions.
+   * truncate这些分区的日志，记录下来这些分区的offsets
+   *
    * 5. Clear the produce and fetch requests in the purgatory
+   * 清理掉延迟调度的请求
+   *
    * 6. If the broker is not shutting down, add the fetcher to the new leaders.
+   * 给新的leader副本添加对应的fetcher
    *
    * The ordering of doing these steps make sure that the replicas in transition will not
    * take any more messages before checkpointing offsets so that all messages before the checkpoint

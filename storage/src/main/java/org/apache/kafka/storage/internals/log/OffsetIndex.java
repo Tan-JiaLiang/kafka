@@ -52,6 +52,7 @@ import java.util.Optional;
  */
 public class OffsetIndex extends AbstractIndex {
     private static final Logger log = LoggerFactory.getLogger(OffsetIndex.class);
+    // 一条索引占用的字节大小，relative offset占用4B，物理position占用4B
     private static final int ENTRY_SIZE = 8;
 
     /* the last offset in the index */
@@ -147,9 +148,15 @@ public class OffsetIndex extends AbstractIndex {
 
             if (entries() == 0 || offset > lastOffset) {
                 log.trace("Adding index entry {} => {} to {}", offset, position, file().getAbsolutePath());
+                // 使用mmap进行内存与磁盘映射
+                // 说白了，就是写os cache
+                // 写入relative offset（message offset）
                 mmap().putInt(relativeOffset(offset));
+                // 写入物理offset（position）
                 mmap().putInt(position);
+                // 增加一条index
                 incrementEntries();
+                // 记录最近一次写入的offset
                 lastOffset = offset;
                 if (entries() * ENTRY_SIZE != mmap().position())
                     throw new IllegalStateException(entries() + " entries but file position in index is " + mmap().position());

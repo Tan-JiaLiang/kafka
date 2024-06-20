@@ -50,12 +50,25 @@ import scala.annotation.nowarn
 /**
  * The entry point to the kafka log management subsystem. The log manager is responsible for log creation, retrieval, and cleaning.
  * All read and write operations are delegated to the individual log instances.
+ * kafka 日志管理子系统的入口。日志管理器负责日志的创建、检索和清理。
+ * 所有读写操作都委托给各个日志实例。
+ *
+ * 每个partition的leader或者follower，就是一个replica
+ * 每个partition replica对应一个log
+ * 如果要往partition leader中写入一批数据，那么就是往log中写入数
+ * 每个log在底层时对应磁盘目录的，在目录里拆分成了多个log segemnt，日志段
+ * 每个日志段有一个磁盘文件
+ * 每个磁盘文件会对应一个.log和.index文件，.log存放数据，.index存放稀疏索引
  *
  * The log manager maintains logs in one or more directories. New logs are created in the data directory
  * with the fewest logs. No attempt is made to move partitions after the fact or balance based on
  * size or I/O rate.
  *
+ * 日志管理器在一个或多个目录中维护日志。新日志会在日志最少的数据目录中创建新日志。不会在事后移动分区或根据 大小或 I/O 速度进行平衡。
+ *
  * A background thread handles log retention by periodically truncating excess log segments.
+ *
+ * 后台线程通过定期截断多余的日志段来处理日志保留问题。
  */
 @threadsafe
 class LogManager(logDirs: Seq[File],
@@ -93,6 +106,7 @@ class LogManager(logDirs: Seq[File],
   // Each element in the queue contains the log object to be deleted and the time it is scheduled for deletion.
   private val logsToBeDeleted = new LinkedBlockingQueue[(UnifiedLog, Long)]()
 
+  // 存活的LogDir目录，可能第一次配置log.dirs有两个路径，但第二次只配置了一个路径
   private val _liveLogDirs: ConcurrentLinkedQueue[File] = createAndValidateLogDirs(logDirs, initialOfflineDirs)
   @volatile private var _currentDefaultConfig = initialDefaultConfig
   @volatile private var numRecoveryThreadsPerDataDir = recoveryThreadsPerDataDir
@@ -137,6 +151,7 @@ class LogManager(logDirs: Seq[File],
   // A map that tells whether all logs in a log dir had been loaded or not at startup time.
   private val loadLogsCompletedFlags = new ConcurrentHashMap[String, Boolean]()
 
+  // kafka数据清理器
   @volatile private var _cleaner: LogCleaner = _
   private[kafka] def cleaner: LogCleaner = _cleaner
 
@@ -276,6 +291,7 @@ class LogManager(logDirs: Seq[File],
                            defaultConfig: LogConfig,
                            topicConfigOverrides: Map[String, LogConfig],
                            numRemainingSegments: ConcurrentMap[String, Int]): UnifiedLog = {
+    // 单个topic-partition
     val topicPartition = UnifiedLog.parseTopicPartitionName(logDir)
     val config = topicConfigOverrides.getOrElse(topicPartition.topic, defaultConfig)
     val logRecoveryPoint = recoveryPoints.getOrElse(topicPartition, 0L)
@@ -299,8 +315,10 @@ class LogManager(logDirs: Seq[File],
       numRemainingSegments = numRemainingSegments)
 
     if (logDir.getName.endsWith(UnifiedLog.DeleteDirSuffix)) {
+      // 说明log已经过期可以删掉
       addLogToBeDeleted(log)
     } else {
+      // 将创建好的UnifiedLog存储到currentLogs中
       val previous = {
         if (log.isFuture)
           this.futureLogs.put(topicPartition, log)
@@ -367,6 +385,7 @@ class LogManager(logDirs: Seq[File],
       val logDirAbsolutePath = dir.getAbsolutePath
       var hadCleanShutdown: Boolean = false
       try {
+        // recovery相关线程池，线程数量由num.recovery.threads.per.data.dir决定，默认线程数是1
         val pool = Executors.newFixedThreadPool(numRecoveryThreadsPerDataDir,
           new LogRecoveryThreadFactory(logDirAbsolutePath))
         threadPools.append(pool)
@@ -398,6 +417,8 @@ class LogManager(logDirs: Seq[File],
               s"$logDirAbsolutePath, resetting to the base offset of the first segment", e)
         }
 
+        // logsToLoad是一个列表
+        // 返回log.dirs下的所有目录（这些目录都是topic-partition这么命名的）
         val logsToLoad = Option(dir.listFiles).getOrElse(Array.empty).filter(logDir =>
           logDir.isDirectory &&
             // Ignore remote-log-index-cache directory as that is index cache maintained by tiered storage subsystem
@@ -419,12 +440,15 @@ class LogManager(logDirs: Seq[File],
           uncleanLogDirs.append(logDirAbsolutePath)
         }
 
+        // 一个目录（topic-partition）创建一个runnable
+        // 这个runnable是用来加载topic-partition目录的
         val jobsForDir = logsToLoad.map { logDir =>
           val runnable: Runnable = () => {
             debug(s"Loading log $logDir")
             var log = None: Option[UnifiedLog]
             val logLoadStartMs = time.hiResClockMs()
             try {
+              // 加载单个目录（topic-partition）
               log = Some(loadLog(logDir, hadCleanShutdown, recoveryPoints, logStartOffsets,
                 defaultConfig, topicConfigOverrides, numRemainingSegments))
             } catch {
@@ -452,6 +476,7 @@ class LogManager(logDirs: Seq[File],
           runnable
         }
 
+        // 提交运行，并行加载log
         jobs += jobsForDir.map(pool.submit)
       } catch {
         case e: IOException =>
@@ -552,32 +577,43 @@ class LogManager(logDirs: Seq[File],
 
   // visible for testing
   private[log] def startupWithConfigOverrides(defaultConfig: LogConfig, topicConfigOverrides: Map[String, LogConfig]): Unit = {
+
+    // 扫描配置的logDir下的目录和文件
+    // 根据目录和文件的格式，加载出来，当前自己本地存储了哪些分区的log
+    // 把每个log的信息实例化成对象，放在内存里
     loadLogs(defaultConfig, topicConfigOverrides) // this could take a while if shutdown was not clean
 
     /* Schedule the cleanup task to delete old logs */
+    // 初始化定时任务
     if (scheduler != null) {
+      // 定时清理log
       info("Starting log cleanup with a period of %d ms.".format(retentionCheckMs))
       scheduler.schedule("kafka-log-retention",
                          () => cleanupLogs(),
                          InitialTaskDelayMs,
                          retentionCheckMs)
+      // 定时flush log到磁盘
       info("Starting log flusher with a default period of %d ms.".format(flushCheckMs))
       scheduler.schedule("kafka-log-flusher",
                          () => flushDirtyLogs(),
                          InitialTaskDelayMs,
                          flushCheckMs)
+      // 定时checkpoint
       scheduler.schedule("kafka-recovery-point-checkpoint",
                          () => checkpointLogRecoveryOffsets(),
                          InitialTaskDelayMs,
                          flushRecoveryOffsetCheckpointMs)
+      // 定时checkpoint
       scheduler.schedule("kafka-log-start-offset-checkpoint",
                          () => checkpointLogStartOffsets(),
                          InitialTaskDelayMs,
                          flushStartOffsetCheckpointMs)
+      // 定时删除log
       scheduler.scheduleOnce("kafka-delete-logs", // will be rescheduled after each delete logs with a dynamic period
                          () => deleteLogs(),
                          InitialTaskDelayMs)
     }
+    // 启动LogCleaner
     if (cleanerConfig.enableCleaner) {
       _cleaner = new LogCleaner(cleanerConfig, liveLogDirs, currentLogs, logDirFailureChannel, time = time)
       _cleaner.startup()
@@ -1399,8 +1435,8 @@ object LogManager {
 
     val cleanerConfig = LogCleaner.cleanerConfig(config)
 
-    new LogManager(logDirs = config.logDirs.map(new File(_).getAbsoluteFile),
-      initialOfflineDirs = initialOfflineDirs.map(new File(_).getAbsoluteFile),
+    new LogManager(logDirs = config.logDirs.map(new File(_).getAbsoluteFile), // log.dirs，可以用逗号隔开多个路径
+      initialOfflineDirs = initialOfflineDirs.map(new File(_).getAbsoluteFile), // 即上一次启动时有A路径，这次启动没有
       configRepository = configRepository,
       initialDefaultConfig = defaultLogConfig,
       cleanerConfig = cleanerConfig,

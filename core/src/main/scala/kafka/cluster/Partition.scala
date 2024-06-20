@@ -1266,17 +1266,22 @@ class Partition(val topicPartition: TopicPartition,
   def appendRecordsToLeader(records: MemoryRecords, origin: AppendOrigin, requiredAcks: Int,
                             requestLocal: RequestLocal): LogAppendInfo = {
     val (info, leaderHWIncremented) = inReadLock(leaderIsrUpdateLock) {
+      // 这个语法，其实就是判断一下当前这个partition在本地是否是leader
       leaderLogIfLocal match {
         case Some(leaderLog) =>
+          // 这个是我们自己配置的，ISR列表中最少数量
           val minIsr = leaderLog.config.minInSyncReplicas
+          // 当前ISR列表数量
           val inSyncSize = partitionState.isr.size
 
           // Avoid writing to leader if there are not enough insync replicas to make it safe
+          // ISR列表数量小于minISR，且acks为-1，则说明无法保证数据安全性
           if (inSyncSize < minIsr && requiredAcks == -1) {
             throw new NotEnoughReplicasException(s"The size of the current ISR ${partitionState.isr} " +
               s"is insufficient to satisfy the min.isr requirement of $minIsr for partition $topicPartition")
           }
 
+          // 获取到这个Partition对应的Log，基于这个Log对象把数据写入进去
           val info = leaderLog.appendAsLeader(records, leaderEpoch = this.leaderEpoch, origin,
             interBrokerProtocolVersion, requestLocal)
 
@@ -1284,6 +1289,7 @@ class Partition(val topicPartition: TopicPartition,
           (info, maybeIncrementLeaderHW(leaderLog))
 
         case None =>
+          // 当前partition已经不是leader了，抛出NotLeaderOrFollowerException异常
           throw new NotLeaderOrFollowerException("Leader not local for partition %s on broker %d"
             .format(topicPartition, localBrokerId))
       }

@@ -217,8 +217,13 @@ class RemoteLeaderEndPoint(logPrefix: String,
       } else {
         metadataVersion.fetchRequestVersion
       }
+      // 构建FetchRequest
       val requestBuilder = FetchRequest.Builder
+        // 最多等待500ms
+        // epoch
+        // 最小获取1B
         .forReplica(version, brokerConfig.brokerId, brokerEpochSupplier(), maxWait, minBytes, fetchData.toSend)
+        // 最多返回10MB
         .setMaxBytes(maxBytes)
         .removed(fetchData.toForget)
         .replaced(fetchData.toReplace)

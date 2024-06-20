@@ -218,10 +218,12 @@ class KafkaServer(
         _brokerState = BrokerState.STARTING
 
         /* setup zookeeper */
+        // 初始化zookeeper组件
         initZkClient(time)
         configRepository = new ZkConfigRepository(new AdminZkClient(zkClient))
 
         /* Get or create cluster_id */
+        // 在zookeeper上创建一个临时节点，代表这个broker
         _clusterId = getOrGenerateClusterId(zkClient)
         info(s"Cluster ID = $clusterId")
 
@@ -251,10 +253,12 @@ class KafkaServer(
         config.dynamicConfig.initialize(Some(zkClient))
 
         /* start scheduler */
+        // kafka线程池调度相关组件
         kafkaScheduler = new KafkaScheduler(config.backgroundThreads)
         kafkaScheduler.startup()
 
         /* create and configure metrics */
+        // kafka broker指标相关组件
         kafkaYammerMetrics = KafkaYammerMetrics.INSTANCE
         kafkaYammerMetrics.configure(config.originals)
         metrics = Server.initializeMetrics(config, time, clusterId)
@@ -268,6 +272,7 @@ class KafkaServer(
         logDirFailureChannel = new LogDirFailureChannel(config.logDirs.size)
 
         /* start log manager */
+        // 数据写入的相关组件（log manager）
         _logManager = LogManager(
           config,
           initialOfflineDirs,
@@ -338,6 +343,7 @@ class KafkaServer(
         //
         // Note that we allow the use of KRaft mode controller APIs when forwarding is enabled
         // so that the Envelope request is exposed. This is only used in testing currently.
+        // 创建NIO server
         socketServer = new SocketServer(config, metrics, time, credentialProvider, apiVersionManager)
 
         // Start alter partition manager based on the IBP version
@@ -358,6 +364,7 @@ class KafkaServer(
         alterPartitionManager.start()
 
         // Start replica manager
+        // 管理副本的相关组件
         _replicaManager = createReplicaManager(isShuttingDown)
         replicaManager.startup()
 
@@ -376,6 +383,7 @@ class KafkaServer(
         _kafkaController = new KafkaController(config, zkClient, time, metrics, brokerInfo, brokerEpoch, tokenManager, brokerFeatures, metadataCache, threadNamePrefix)
         kafkaController.startup()
 
+        // zookeeper迁移至raft时，走下面这段逻辑
         if (config.migrationEnabled) {
           logger.info("Starting up additional components for ZooKeeper migration")
           lifecycleManager = new BrokerLifecycleManager(config,
@@ -448,6 +456,7 @@ class KafkaServer(
 
         /* start group coordinator */
         // Hardcode Time.SYSTEM for now as some Streams tests fail otherwise, it would be good to fix the underlying issue
+        // 管理消费者组的组件
         groupCoordinator = GroupCoordinatorAdapter(
           config,
           replicaManager,
@@ -475,6 +484,7 @@ class KafkaServer(
           () => zkClient.getTopicPartitionCount(Topic.TRANSACTION_STATE_TOPIC_NAME).getOrElse(config.transactionTopicPartitions))
 
         /* start auto topic creation manager */
+        // topic自动创建组件
         this.autoTopicCreationManager = AutoTopicCreationManager(
           config,
           metadataCache,
@@ -487,6 +497,7 @@ class KafkaServer(
         )
 
         /* Get the authorizer and initialize it if one is specified.*/
+        // 权限认证相关组件
         authorizer = config.createNewAuthorizer()
         authorizer.foreach(_.configure(config.originals))
         val authorizerFutures: Map[Endpoint, CompletableFuture[Void]] = authorizer match {
@@ -510,6 +521,7 @@ class KafkaServer(
         /* start processing requests */
         val zkSupport = ZkSupport(adminManager, kafkaController, zkClient, forwardingManager, metadataCache, brokerEpochManager)
 
+        // Kafka的Apis，封装了kafka各种各样的请求类型
         def createKafkaApis(requestChannel: RequestChannel): KafkaApis = new KafkaApis(
           requestChannel = requestChannel,
           metadataSupport = zkSupport,
@@ -533,6 +545,7 @@ class KafkaServer(
 
         dataPlaneRequestProcessor = createKafkaApis(socketServer.dataPlaneRequestChannel)
 
+        // 处理request请求的线程池，可以通过参数num.io.threads设置线程数，默认是8
         dataPlaneRequestHandlerPool = new KafkaRequestHandlerPool(config.brokerId, socketServer.dataPlaneRequestChannel, dataPlaneRequestProcessor, time,
           config.numIoThreads, s"${DataPlaneAcceptor.MetricPrefix}RequestHandlerAvgIdlePercent", DataPlaneAcceptor.ThreadPrefix)
 

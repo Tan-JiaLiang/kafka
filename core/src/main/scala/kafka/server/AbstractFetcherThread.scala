@@ -108,6 +108,7 @@ abstract class AbstractFetcherThread(name: String,
   }
 
   override def doWork(): Unit = {
+    // 可能leader挂了，重新选举别的broker作为leader，这时可能需要truncate掉数据
     maybeTruncate()
     maybeFetch()
   }
@@ -126,6 +127,7 @@ abstract class AbstractFetcherThread(name: String,
       fetchRequestOpt
     }
 
+    // 开始做fetch操作
     fetchRequestOpt.foreach { case ReplicaFetch(sessionPartitions, fetchRequest) =>
       processFetchRequest(sessionPartitions, fetchRequest)
     }
@@ -311,6 +313,7 @@ abstract class AbstractFetcherThread(name: String,
     val divergingEndOffsets = mutable.Map.empty[TopicPartition, EpochEndOffset]
     var responseData: Map[TopicPartition, FetchData] = Map.empty
 
+    // 向leader发送fetch请求
     try {
       trace(s"Sending fetch request $fetchRequest")
       responseData = leader.fetch(fetchRequest)

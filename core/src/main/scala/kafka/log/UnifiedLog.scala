@@ -384,6 +384,7 @@ class UnifiedLog(@volatile var logStartOffset: Long,
       case Some(offsetMetadata) if offsetMetadata.messageOffset < highWatermarkMetadata.messageOffset =>
         if (offsetMetadata.messageOffsetOnly) {
           lock synchronized {
+            // 关注这里，核心方法
             val fullOffset = convertToOffsetMetadataOrThrow(offsetMetadata.messageOffset)
             if (firstUnstableOffsetMetadata.contains(offsetMetadata))
               firstUnstableOffsetMetadata = Some(fullOffset)
@@ -721,11 +722,14 @@ class UnifiedLog(@volatile var logStartOffset: Long,
       var validRecords = trimInvalidBytes(records, appendInfo)
 
       // they are valid, insert them in the log
+      // 并发控制的基数，对于一个分区目录而言，在写入的时候都是进行并发控制的
       lock synchronized {
         maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
           localLog.checkIfMemoryMappedBufferClosed()
           if (validateAndAssignOffsets) {
             // assign offsets to the message set
+            // 其实就是对于每个分区目录，在写入数据的时候，消息的offset都是顺序增长的
+            // 获取offset
             val offset = PrimitiveRef.ofLong(localLog.logEndOffset)
             appendInfo.setFirstOffset(Optional.of(new LogOffsetMetadata(offset.value)))
             val validateAndOffsetAssignResult = try {
@@ -820,6 +824,7 @@ class UnifiedLog(@volatile var logStartOffset: Long,
           }
 
           // maybe roll the log if this segment is full
+          // 如果一个segment写满了，他有固定的大小，1GB，此时就要创建新的segment file
           val segment = maybeRoll(validRecords.sizeInBytes, appendInfo)
 
           val logOffsetMetadata = new LogOffsetMetadata(
@@ -850,7 +855,9 @@ class UnifiedLog(@volatile var logStartOffset: Long,
               // will be cleaned up after the log directory is recovered. Note that the end offset of the
               // ProducerStateManager will not be updated and the last stable offset will not advance
               // if the append to the transaction index fails.
+              // 写入磁盘文件，并更新LEO
               localLog.append(appendInfo.lastOffset, appendInfo.maxTimestamp, appendInfo.offsetOfMaxTimestamp, validRecords)
+              // 尝试更新HW
               updateHighWatermarkWithLogEndOffset()
 
               // update the producer state
@@ -876,6 +883,8 @@ class UnifiedLog(@volatile var logStartOffset: Long,
                 s"next offset: ${localLog.logEndOffset}, " +
                 s"and messages: $validRecords")
 
+              // 判断是否要进行flush
+              // os cache超过log.flush.interval.messages条数据就执行flush
               if (localLog.unflushedMessages >= config.flushInterval) flush(false)
           }
           appendInfo

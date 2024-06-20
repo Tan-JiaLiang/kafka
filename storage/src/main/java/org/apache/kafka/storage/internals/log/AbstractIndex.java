@@ -85,7 +85,9 @@ public abstract class AbstractIndex implements Closeable {
     }
 
     private void createAndAssignMmap() throws IOException {
+        // 创建一个文件
         boolean newlyCreated = file.createNewFile();
+        // 随机访问文件
         RandomAccessFile raf;
         if (writable)
             raf = new RandomAccessFile(file, "rw");
@@ -94,12 +96,14 @@ public abstract class AbstractIndex implements Closeable {
 
         try {
             /* pre-allocate the file if necessary */
+            // 设置文件大小
             if (newlyCreated) {
                 if (maxIndexSize < entrySize())
                     throw new IllegalArgumentException("Invalid max index size: " + maxIndexSize);
                 raf.setLength(roundDownToExactMultiple(maxIndexSize, entrySize()));
             }
 
+            // 创建MappedByteBuffer和RandomAccessFile的映射
             long length = raf.length();
             MappedByteBuffer mmap = createMappedBuffer(raf, newlyCreated, length, writable, entrySize());
 

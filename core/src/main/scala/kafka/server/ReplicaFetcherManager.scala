@@ -36,6 +36,9 @@ class ReplicaFetcherManager(brokerConfig: KafkaConfig,
         clientId = "Replica",
         numFetchers = brokerConfig.numReplicaFetchers) {
 
+  /**
+   * 创建一个副本同步的拉取线程
+   */
   override def createFetcherThread(fetcherId: Int, sourceBroker: BrokerEndPoint): ReplicaFetcherThread = {
     val prefix = threadNamePrefix.map(tp => s"$tp:").getOrElse("")
     val threadName = s"${prefix}ReplicaFetcherThread-$fetcherId-${sourceBroker.id}"

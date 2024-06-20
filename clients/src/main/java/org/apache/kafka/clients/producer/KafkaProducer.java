@@ -1162,6 +1162,8 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
 
     /**
      * Wait for cluster metadata including partitions for the given topic to be available.
+     * 等待获取topic & partition的元数据
+     *
      * @param topic The topic we want metadata for
      * @param partition A specific partition expected to exist in metadata, or null if there's no preference
      * @param nowMs The current time in ms
@@ -1177,8 +1179,12 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
         if (cluster.invalidTopics().contains(topic))
             throw new InvalidTopicException(topic);
 
+        // 增加topic元数据，设置过期时间（元数据的过期时间是读时或写时续命的）
         metadata.add(topic, nowMs);
 
+        // 获取元数据
+        // 1. 从缓存中获取
+        // 2. 如果缓存里面没有，就请求broker获取，请求broker是异步请求的，这里会阻塞住，等待返回
         Integer partitionsCount = cluster.partitionCountForTopic(topic);
         // Return cached metadata if we have it, and if the record's partition is either undefined
         // or within the known partition range
@@ -1199,6 +1205,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             } else {
                 log.trace("Requesting metadata update for topic {}.", topic);
             }
+            // 元数据续命
             metadata.add(topic, nowMs + elapsed);
             // 设置标志位，等待sender线程更新
             int version = metadata.requestUpdateForTopic(topic);
